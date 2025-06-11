@@ -29,3 +29,6 @@ jax_cache/
 # OS
 .DS_Store
 Thumbs.db
+
+# Project docs
+CLAUDE.md
