@@ -2,7 +2,6 @@ import jax
 import jax.numpy as jnp
 import tabsmc.dumpy as dp
 from tabsmc.smc import step_particle, init_particle
-import numpy as np
 
 # JIT compile step_particle for faster execution
 step_particle_jit = jax.jit(step_particle)

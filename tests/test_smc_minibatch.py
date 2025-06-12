@@ -1,8 +1,6 @@
 import jax
 import jax.numpy as jnp
-import tabsmc.dumpy as dp
-from tabsmc.smc import smc_minibatch, smc_minibatch_fast, init_smc
-import numpy as np
+from tabsmc.smc import smc_minibatch_fast, init_smc
 
 
 def test_smc_minibatch():

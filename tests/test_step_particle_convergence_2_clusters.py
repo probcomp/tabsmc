@@ -2,7 +2,6 @@ import jax
 import jax.numpy as jnp
 import tabsmc.dumpy as dp
 from tabsmc.smc import step_particle
-import numpy as np
 
 
 def test_step_particle_convergence():
