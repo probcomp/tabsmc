@@ -1,6 +1,6 @@
 # tabsmc
 
-Tabular Sequential Monte Carlo implementation with DumPy.
+Tabular Sequential Monte Carlo
 
 This repository contains:
 - `dumpy.py`: DumPy syntax wrapper for jax
