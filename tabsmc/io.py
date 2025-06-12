@@ -3,8 +3,7 @@ import numpy as np
 from jaxtyping import Float, Array
 from os import getenv
 
-ACCESS_TOKEN = "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"
-# getenv("HF_TOKEN")
+getenv("HF_TOKEN")
 
 
 def discretize_dataframe(df: pl.DataFrame, n_bins: int = 20):
