@@ -1,6 +1,7 @@
 import jax
 import jax.numpy as jnp
-from tabsmc.smc import smc_minibatch_fast, init_smc
+import tabsmc.dumpy as dp
+from tabsmc.smc import smc_minibatch, init_particle
 
 
 def test_smc_minibatch():
@@ -16,12 +17,12 @@ def test_smc_minibatch():
     C_model = 3  # Model number of clusters
     P = 10    # Number of particles
     T = 50    # Number of iterations
-    L = 100   # Minibatch size
+    B = 100   # Minibatch size (renamed from L to B to match new API)
     
     print("Testing SMC minibatch algorithm...")
     print(f"Data size: N={N}, D={D}, K={K}")
     print(f"True clusters: {C_true}, Model clusters: {C_model}")
-    print(f"Particles: {P}, Iterations: {T}, Minibatch size: {L}")
+    print(f"Particles: {P}, Iterations: {T}, Minibatch size: {B}")
     
     # Generate synthetic data from a mixture model
     # True mixing weights
@@ -56,27 +57,37 @@ def test_smc_minibatch():
     
     print("\nGenerated synthetic data from 2-cluster mixture model")
     
-    # Hyperparameters
+    # Convert to dumpy array as required by new SMC function
+    X_dp = dp.Array(X)
+    
+    # Hyperparameters (as scalars)
     α_pi = 1.0
     α_theta = 1.0
     
-    # Run SMC algorithm (using fast vectorized version)
-    print("\nRunning SMC algorithm (fast version with vmap)...")
+    # Run SMC algorithm (using new streamlined version)
+    print("\nRunning SMC algorithm (new dumpy-based version)...")
     key, subkey = jax.random.split(key)
-    particles, log_Z = smc_minibatch_fast(subkey, X, T, P, C_model, L, α_pi, α_theta)
+    A, φ, π, θ, w, γ = smc_minibatch(subkey, X_dp, T, P, C_model, B, α_pi, α_theta)
     
     print(f"\nAlgorithm completed!")
+    
+    # Compute log marginal likelihood estimate from final weights
+    log_Z = jax.scipy.special.logsumexp(w.data) - jnp.log(P)
     print(f"Log marginal likelihood estimate: {log_Z}")
-    print(f"Final particle weights: {particles['w']}")
-    print(f"Effective sample size: {1.0 / jnp.sum(particles['w']**2):.2f} / {P}")
+    
+    # Normalize weights to get probabilities
+    w_norm = w.data - jax.scipy.special.logsumexp(w.data)
+    w_probs = jnp.exp(w_norm)
+    print(f"Final particle weights: {w_probs}")
+    print(f"Effective sample size: {1.0 / jnp.sum(w_probs**2):.2f} / {P}")
     
     # Analyze the best particle
-    best_p = jnp.argmax(particles['w'])
-    print(f"\nBest particle (index {best_p}, weight {particles['w'][best_p]:.4f}):")
+    best_p = jnp.argmax(w_probs)
+    print(f"\nBest particle (index {best_p}, weight {w_probs[best_p]:.4f}):")
     
     # Get learned parameters for best particle
-    π_best = jnp.exp(particles['π'][best_p])
-    θ_best = jnp.exp(particles['θ'][best_p])
+    π_best = jnp.exp(π.data[best_p])
+    θ_best = jnp.exp(θ.data[best_p])
     
     print(f"Learned mixing weights: {π_best}")
     
@@ -107,45 +118,42 @@ def test_smc_minibatch():
     
     # Basic sanity checks
     assert jnp.isfinite(log_Z), "Log marginal likelihood should be finite"
-    assert jnp.all(particles['w'] >= 0), "Weights should be non-negative"
+    assert jnp.all(w_probs >= 0), "Weights should be non-negative"
+    assert jnp.allclose(jnp.sum(w_probs), 1.0, atol=1e-6), "Weights should sum to 1"
     assert error < 0.1, f"Marginal error {error:.4f} should be < 0.1"
     
     print("\n✅ All SMC minibatch tests passed!")
 
 
-def test_init_smc():
-    """Test the initialization function."""
+def test_init_particle():
+    """Test the particle initialization function."""
     key = jax.random.PRNGKey(42)
-    P, C, D, K, N = 5, 3, 2, 4, 100
+    C, D, K, N = 3, 2, 4, 100
     α_pi, α_theta = 1.0, 0.5
     
-    particles = init_smc(key, P, C, D, K, N, α_pi, α_theta)
+    A, φ, π, θ = init_particle(key, C, D, K, N, α_pi, α_theta)
     
     # Check shapes
-    assert particles['A'].shape == (P, N, C)
-    assert particles['φ'].shape == (P, C, D, K)
-    assert particles['π'].shape == (P, C)
-    assert particles['θ'].shape == (P, C, D, K)
-    assert particles['w'].shape == (P,)
-    assert particles['w_log'].shape == (P,)
+    assert A.shape == (N, C)
+    assert φ.shape == (C, D, K)
+    assert π.shape == (C,)
+    assert θ.shape == (C, D, K)
     
     # Check initialization values
-    assert jnp.all(particles['A'] == 0), "Assignments should be initialized to zero"
-    assert jnp.all(particles['φ'] == 0), "Sufficient statistics should be zero"
-    assert jnp.all(particles['w'] == 1), "Weights should be initialized to 1 (exp(0))"
-    assert jnp.all(particles['w_log'] == 0), "Log weights should be zero"
+    assert jnp.all(A.data == 0), "Assignments should be initialized to zero"
+    assert jnp.all(φ.data == 0), "Sufficient statistics should be zero"
     
     # Check that π sums to 1 in probability space
-    π_probs = jnp.exp(particles['π'])
-    assert jnp.allclose(jnp.sum(π_probs, axis=1), 1.0, atol=1e-6), "π should sum to 1"
+    π_probs = jnp.exp(π.data)
+    assert jnp.allclose(jnp.sum(π_probs), 1.0, atol=1e-6), "π should sum to 1"
     
     # Check that θ sums to 1 in probability space
-    θ_probs = jnp.exp(particles['θ'])
+    θ_probs = jnp.exp(θ.data)
     assert jnp.allclose(jnp.sum(θ_probs, axis=-1), 1.0, atol=1e-6), "θ should sum to 1"
     
-    print("✅ init_smc test passed!")
+    print("✅ init_particle test passed!")
 
 
 if __name__ == "__main__":
-    test_init_smc()
+    test_init_particle()
     test_smc_minibatch()
