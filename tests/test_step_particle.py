@@ -42,24 +42,14 @@ def test_step_particle():
     α_pi = 0.1  # Dirichlet prior for mixing weights
     α_theta = 0.1  # Dirichlet prior for emissions
     
-    A_one_hot_data, φ_data, π_data, θ_data = init_particle(subkey, C, D, K, N, α_pi, α_theta)
-    
-    # Convert to dumpy arrays
-    A_one_hot = dp.Array(A_one_hot_data)
-    φ = dp.Array(φ_data)
-    π = dp.Array(π_data)
-    θ = dp.Array(θ_data)
-    
-    # Convert hyperparameters to dumpy arrays for step_particle
-    α_pi_dp = dp.Array(α_pi)
-    α_theta_dp = dp.Array(α_theta)
+    A_one_hot, φ, π, θ = init_particle(subkey, C, D, K, N, α_pi, α_theta)
     
     print("Testing step_particle...")
     print(f"Dimensions: B={B}, C={C}, D={D}, K={K}, N={N}")
     
     # Call step_particle
     A_one_hot_new, φ_new, π_new, θ_new, γ, q = step_particle(
-        key, X_B, I_B, A_one_hot, φ, π, θ, α_pi_dp, α_theta_dp
+        key, X_B, I_B, A_one_hot, φ, π, θ, dp.Array(α_pi), dp.Array(α_theta)
     )
     
     print("✓ step_particle executed successfully!")

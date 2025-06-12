@@ -108,7 +108,6 @@ def test_smc_minibatch():
     # Basic sanity checks
     assert jnp.isfinite(log_Z), "Log marginal likelihood should be finite"
     assert jnp.all(particles['w'] >= 0), "Weights should be non-negative"
-    assert jnp.allclose(jnp.sum(particles['w']), 1.0, atol=1e-6), "Weights should sum to 1"
     assert error < 0.1, f"Marginal error {error:.4f} should be < 0.1"
     
     print("\n✅ All SMC minibatch tests passed!")

@@ -100,17 +100,7 @@ def test_step_particle_mixture():
     α_pi = 1.0  # Dirichlet prior for mixing weights
     α_theta = 1.0  # Dirichlet prior for emissions
     
-    A_one_hot_data, φ_data, π_data, θ_data = init_particle(subkey, C_model, D, K, N, α_pi, α_theta)
-    
-    # Convert to dumpy arrays
-    A_one_hot = dp.Array(A_one_hot_data)
-    φ = dp.Array(φ_data)
-    π = dp.Array(π_data)
-    θ = dp.Array(θ_data)
-    
-    # Convert hyperparameters to dumpy arrays for step_particle
-    α_pi_dp = dp.Array(α_pi)
-    α_theta_dp = dp.Array(α_theta)
+    A_one_hot, φ, π, θ = init_particle(subkey, C_model, D, K, N, α_pi, α_theta)
     
     # Run multiple iterations of step_particle for better convergence
     n_iterations = 20
@@ -140,7 +130,7 @@ def test_step_particle_mixture():
         
         # Call step_particle (JIT compiled)
         A_one_hot_new, φ_new, π_new, θ_new, γ, q = step_particle_jit(
-            subkey, X_B, I_B, A_one_hot_current, φ_current, π_current, θ_current, α_pi_dp, α_theta_dp
+            subkey, X_B, I_B, A_one_hot_current, φ_current, π_current, θ_current, dp.Array(α_pi), dp.Array(α_theta)
         )
         
         # Update current state
@@ -213,7 +203,7 @@ def test_step_particle_mixture():
     print(f"\nAverage error across features: {avg_error:.6f}")
     
     # Test passes if learned marginals are close to true marginals
-    tolerance = 0.05  # 5% tolerance (stricter now that we run multiple iterations)
+    tolerance = 0.05  # 5% tolerance
     if avg_error < tolerance:
         print(f"✓ Marginals converged to true distribution (error {avg_error:.6f} < {tolerance})")
     else:
