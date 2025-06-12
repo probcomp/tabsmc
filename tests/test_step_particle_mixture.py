@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 import tabsmc.dumpy as dp
-from tabsmc.smc import step_particle
+from tabsmc.smc import step_particle, init_particle
 import numpy as np
 
 # JIT compile step_particle for faster execution
@@ -96,27 +96,22 @@ def test_step_particle_mixture():
     I_B_data = jnp.arange(B)
     I_B = dp.Array(I_B_data)
     
-    # Initialize arrays for our 5-cluster model
-    A_one_hot_data = jnp.zeros((N, C_model))
+    # Initialize particle using init_particle from smc.py for our 5-cluster model
+    key, subkey = jax.random.split(key)
+    α_pi = 1.0  # Dirichlet prior for mixing weights
+    α_theta = 1.0  # Dirichlet prior for emissions
+    
+    A_one_hot_data, φ_data, π_data, θ_data = init_particle(subkey, C_model, D, K, N, α_pi, α_theta)
+    
+    # Convert to dumpy arrays
     A_one_hot = dp.Array(A_one_hot_data)
-    
-    φ_data = jnp.zeros((C_model, D, K))
     φ = dp.Array(φ_data)
-    
-    # Initialize π and θ randomly for our 5-cluster model
-    key, subkey = jax.random.split(key)
-    π_data = jax.random.normal(subkey, (C_model,))
-    π_data = π_data - jax.scipy.special.logsumexp(π_data)  # Normalize in log space
     π = dp.Array(π_data)
-    
-    key, subkey = jax.random.split(key)
-    θ_data = jax.random.normal(subkey, (C_model, D, K))
-    θ_data = θ_data - jax.scipy.special.logsumexp(θ_data, axis=-1, keepdims=True)  # Normalize
     θ = dp.Array(θ_data)
     
-    # Hyperparameters
-    α_pi = dp.Array(1.0)
-    α_theta = dp.Array(1.0)
+    # Convert hyperparameters to dumpy arrays for step_particle
+    α_pi_dp = dp.Array(α_pi)
+    α_theta_dp = dp.Array(α_theta)
     
     # Run multiple iterations of step_particle for better convergence
     n_iterations = 20
@@ -146,7 +141,7 @@ def test_step_particle_mixture():
         
         # Call step_particle (JIT compiled)
         A_one_hot_new, φ_new, π_new, θ_new, γ, q = step_particle_jit(
-            subkey, X_B, I_B, A_one_hot_current, φ_current, π_current, θ_current, α_pi, α_theta
+            subkey, X_B, I_B, A_one_hot_current, φ_current, π_current, θ_current, α_pi_dp, α_theta_dp
         )
         
         # Update current state

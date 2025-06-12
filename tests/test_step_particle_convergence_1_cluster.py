@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 import tabsmc.dumpy as dp
-from tabsmc.smc import step_particle
+from tabsmc.smc import step_particle, init_particle
 import numpy as np
 
 
@@ -50,25 +50,22 @@ def test_step_particle_convergence():
     I_B_data = jnp.arange(B)
     I_B = dp.Array(I_B_data)
     
-    # Initialize A_one_hot (will be updated by step_particle)
-    A_one_hot_data = jnp.zeros((N, C))
+    # Initialize particle using init_particle from smc.py
+    key, subkey = jax.random.split(key)
+    α_pi = 1.0  # Dirichlet prior for mixing weights
+    α_theta = 1.0  # Dirichlet prior for emissions
+    
+    A_one_hot_data, φ_data, π_data, θ_data = init_particle(subkey, C, D, K, N, α_pi, α_theta)
+    
+    # Convert to dumpy arrays
     A_one_hot = dp.Array(A_one_hot_data)
-    
-    # Initialize φ (sufficient statistics) 
-    φ_data = jnp.zeros((C, D, K))
     φ = dp.Array(φ_data)
-    
-    # Initialize π (mixing weights) - slightly favor cluster 0
-    π_data = jnp.array([0.])  
     π = dp.Array(π_data)
-    
-    # Initialize θ (emission parameters) - neutral starting point
-    θ_data = jnp.zeros((C, D, K))
     θ = dp.Array(θ_data)
     
-    # Hyperparameters - convert to dumpy arrays as scalars
-    α_pi = dp.Array(1.0)  # Dirichlet prior for mixing weights
-    α_theta = dp.Array(1.0)  # Dirichlet prior for emissions
+    # Convert hyperparameters to dumpy arrays for step_particle
+    α_pi_dp = dp.Array(α_pi)
+    α_theta_dp = dp.Array(α_theta)
     
     print("Testing step_particle convergence to known distributions...")
     print(f"True probabilities per feature:")
@@ -78,7 +75,7 @@ def test_step_particle_convergence():
     
     # Call step_particle
     A_one_hot_new, φ_new, π_new, θ_new, γ, q = step_particle(
-        key, X_B, I_B, A_one_hot, φ, π, θ, α_pi, α_theta
+        key, X_B, I_B, A_one_hot, φ, π, θ, α_pi_dp, α_theta_dp
     )
 
     
