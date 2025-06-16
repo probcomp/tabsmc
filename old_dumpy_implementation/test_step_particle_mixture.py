@@ -1,14 +1,14 @@
 import jax
 import jax.numpy as jnp
 import tabsmc.dumpy as dp
-from tabsmc.smc import step_particle, init_particle
+from tabsmc.smc import gibbs, init_particle
 
-# JIT compile step_particle for faster execution
-step_particle_jit = jax.jit(step_particle)
+# JIT compile gibbs for faster execution
+gibbs_jit = jax.jit(gibbs)
 
 
-def test_step_particle_mixture():
-    """Test step_particle with multi-cluster data generating process."""
+def test_gibbs_mixture():
+    """Test gibbs with multi-cluster data generating process."""
     # Set fixed seed for reproducibility
     key = jax.random.PRNGKey(42)
     
@@ -20,7 +20,7 @@ def test_step_particle_mixture():
     K = 3    # Number of categories per feature
     N = 1000  # Total number of data points
     
-    print("Testing step_particle with multi-cluster mixture model...")
+    print("Testing gibbs with multi-cluster mixture model...")
     print(f"True process: {C_true} clusters, Model: {C_model} clusters")
     print(f"Dimensions: B={B}, D={D}, K={K}, N={N}")
     
@@ -102,9 +102,9 @@ def test_step_particle_mixture():
     
     A_one_hot, φ, π, θ = init_particle(subkey, C_model, D, K, N, α_pi, α_theta)
     
-    # Run multiple iterations of step_particle for better convergence
+    # Run multiple iterations of gibbs for better convergence
     n_iterations = 20
-    print(f"\nRunning {n_iterations} iterations of step_particle...")
+    print(f"\nRunning {n_iterations} iterations of gibbs...")
     
     # Track convergence metrics
     errors_per_iteration = []
@@ -128,8 +128,8 @@ def test_step_particle_mixture():
         X_B_data = jax.nn.one_hot(X_B_categories, K)
         X_B = dp.Array(X_B_data)
         
-        # Call step_particle (JIT compiled)
-        A_one_hot_new, φ_new, π_new, θ_new, γ, q = step_particle_jit(
+        # Call gibbs (JIT compiled)
+        A_one_hot_new, φ_new, π_new, θ_new, γ, q = gibbs_jit(
             subkey, X_B, I_B, A_one_hot_current, φ_current, π_current, θ_current, dp.Array(α_pi), dp.Array(α_theta)
         )
         
@@ -159,7 +159,7 @@ def test_step_particle_mixture():
     print(f"  Iteration {n_iterations-1:2d}: error = {errors_per_iteration[-1]:.6f}")
     
     print("\n=== RESULTS ===")
-    print("✓ step_particle executed successfully!")
+    print("✓ gibbs executed successfully!")
     print(f"Final γ (log joint probability): {γ.data}")
     print(f"Final q (log proposal probability): {q.data}")
     print(f"\nError reduction: {errors_per_iteration[0]:.6f} → {errors_per_iteration[-1]:.6f}")
@@ -220,8 +220,8 @@ def test_step_particle_mixture():
     assert jnp.allclose(jnp.sum(jnp.exp(θ_new.data), axis=-1), 1.0, atol=1e-4), "θ should sum to 1"
     
     print("\n✅ All mixture model tests completed!")
-    print("The step_particle function shows ability to fit multi-cluster data.")
+    print("The gibbs function shows ability to fit multi-cluster data.")
 
 
 if __name__ == "__main__":
-    test_step_particle_mixture()
+    test_gibbs_mixture()

@@ -1,10 +1,10 @@
 import jax
 import jax.numpy as jnp
 import tabsmc.dumpy as dp
-from tabsmc.smc import step_particle, init_particle
+from tabsmc.smc import gibbs, init_particle
 
-def test_step_particle():
-    """Basic test for step_particle function."""
+def test_gibbs():
+    """Basic test for gibbs function."""
     # Set random seed for reproducibility
     key = jax.random.PRNGKey(42)
 
@@ -44,15 +44,15 @@ def test_step_particle():
     
     A_one_hot, φ, π, θ = init_particle(subkey, C, D, K, N, α_pi, α_theta)
     
-    print("Testing step_particle...")
+    print("Testing gibbs...")
     print(f"Dimensions: B={B}, C={C}, D={D}, K={K}, N={N}")
     
-    # Call step_particle
-    A_one_hot_new, φ_new, π_new, θ_new, γ, q = step_particle(
+    # Call gibbs
+    A_one_hot_new, φ_new, π_new, θ_new, γ, q = gibbs(
         key, X_B, I_B, A_one_hot, φ, π, θ, dp.Array(α_pi), dp.Array(α_theta)
     )
     
-    print("✓ step_particle executed successfully!")
+    print("✓ gibbs executed successfully!")
     print(f"Output shapes:")
     print(f"  A_one_hot: {A_one_hot_new.shape}")
     print(f"  φ: {φ_new.shape}")
@@ -65,7 +65,7 @@ def test_step_particle():
     print(f"  γ = {γ.data} (should be <= 0)")
     print(f"  q = {q.data} (should be <= 0)")
     
-    # Debug: let's check what γ and q represent in the step_particle computation
+    # Debug: let's check what γ and q represent in the gibbs computation
     print(f"\nDebugging γ computation...")
     print(f"  π_new range: [{jnp.min(π_new.data):.4f}, {jnp.max(π_new.data):.4f}]")
     print(f"  θ_new range: [{jnp.min(θ_new.data):.4f}, {jnp.max(θ_new.data):.4f}]")
@@ -80,4 +80,4 @@ def test_step_particle():
     print("\n✓ All sanity checks passed!")
 
 if __name__ == "__main__":
-    test_step_particle()
+    test_gibbs()

@@ -1,17 +1,17 @@
 import jax
 import jax.numpy as jnp
 import tabsmc.dumpy as dp
-from tabsmc.smc import step_particle, init_particle
+from tabsmc.smc import gibbs, init_particle
 
 
-def test_step_particle_convergence():
-    """Test step_particle convergence to known categorical distributions."""
+def test_gibbs_convergence():
+    """Test gibbs convergence to known categorical distributions."""
     # Set fixed seed for reproducibility
     key = jax.random.PRNGKey(1)
     
     # Set dimensions - use larger X_B for more deterministic behavior
     B = 10000   # Number of particles
-    C = 2   # Number of clusters/components  
+    C = 1   # Number of clusters/components  
     D = 3   # Number of features
     K = 3   # Number of categories per feature
     N = 10000  # Total number of data points
@@ -56,20 +56,20 @@ def test_step_particle_convergence():
     
     A_one_hot, φ, π, θ = init_particle(subkey, C, D, K, N, α_pi, α_theta)
     
-    print("Testing step_particle convergence to known distributions...")
+    print("Testing gibbs convergence to known distributions...")
     print(f"True probabilities per feature:")
     for d in range(D):
         print(f"  Feature {d}: {true_probs[d]}")
     print(f"Dimensions: B={B}, C={C}, D={D}, K={K}, N={N}")
     
-    # Call step_particle
-    A_one_hot_new, φ_new, π_new, θ_new, γ, q = step_particle(
+    # Call gibbs
+    A_one_hot_new, φ_new, π_new, θ_new, γ, q = gibbs(
         key, X_B, I_B, A_one_hot, φ, π, θ, dp.Array(α_pi), dp.Array(α_theta)
     )
 
     
     print("\n=== RESULTS ===")
-    print("✓ step_particle executed successfully!")
+    print("✓ gibbs executed successfully!")
     print(f"Output shapes:")
     print(f"  A_one_hot: {A_one_hot_new.shape}")
     print(f"  φ: {φ_new}")
@@ -149,7 +149,7 @@ def test_step_particle_convergence():
         print(f"  Feature {d}: {mixture_probs} (true: {true_probs[d]})")
         
         # Check if mixture probabilities are reasonably close to true ones
-        tolerance = 0.01  # 1% tolerance 
+        tolerance = 0.01  # 1% tolerance
         close_enough = jnp.allclose(mixture_probs, true_probs[d], atol=tolerance)
         if close_enough:
             print(f"    ✓ Close to true distribution (within {tolerance})")
@@ -157,8 +157,8 @@ def test_step_particle_convergence():
             print(f"    ⚠ Differs from true distribution (tolerance {tolerance})")
     
     print("\n✅ All convergence tests completed!")
-    print("The step_particle function shows convergence behavior towards true distributions.")
+    print("The gibbs function shows convergence behavior towards true distributions.")
 
 
 if __name__ == "__main__":
-    test_step_particle_convergence()
+    test_gibbs_convergence()
