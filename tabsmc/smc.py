@@ -5,7 +5,7 @@ from functools import partial
 
 
 @jax.jit
-def step_particle(key, X_B, I_B, A_one_hot, φ_old, π_old, θ_old, α_pi, α_theta):
+def gibbs(key, X_B, I_B, A_one_hot, φ_old, π_old, θ_old, α_pi, α_theta):
     B, D, K = X_B.shape
     C = π_old.shape[0]
     key, subkey = jax.random.split(key)
@@ -17,6 +17,7 @@ def step_particle(key, X_B, I_B, A_one_hot, φ_old, π_old, θ_old, α_pi, α_th
         log_probs,
         φ,
         φ_B,
+        φ_B_old,
         π,
         θ,
         counts,
@@ -39,7 +40,8 @@ def step_particle(key, X_B, I_B, A_one_hot, φ_old, π_old, θ_old, α_pi, α_th
     A_B_pgibbs["B", "C"] = log_probs["B", "C"] * A_B_one_hot["B", "C"]
 
     φ_B["C", "D", "K"] = dp.sum(A_B_one_hot[:, "C"] * X_B[:, "D", "K"])
-    φ["C", "D", "K"] = φ_old["C", "D", "K"] + φ_B["C", "D", "K"]
+    φ_B_old["C", "D", "K"] = dp.sum(A_one_hot[I_B["B"], "C"] * X_B[:, "D", "K"])
+    φ["C", "D", "K"] = φ_old["C", "D", "K"] + φ_B["C", "D", "K"] - φ_B_old["C", "D", "K"]
     counts["C"] = dp.sum(φ["C", :, :])
 
     key, subkey = jax.random.split(key)
@@ -132,9 +134,7 @@ def smc_minibatch(key, X, T, P, C, B, α_pi, α_theta, ess=0.5):
     γ = dp.zeros(P)
 
     for t in range(T):
-        # Sample minibatch without replacement
-        key, subkey = jax.random.split(key)
-        I_B = dp.Array(jax.random.choice(subkey, N, shape=(B,), replace=False))
+        I_B = dp.Array(jnp.arange(B*t, B*(t+1)))
         X_B = dp.Slot()
         X_B["B", :, :] = X[I_B["B"]]  # Minibatch data
 
@@ -142,7 +142,7 @@ def smc_minibatch(key, X, T, P, C, B, α_pi, α_theta, ess=0.5):
 
         # Process each particle
         key, subkey = jax.random.split(key)
-        A, φ, π, θ, γ, q = step_particle(
+        A, φ, π, θ, γ, q = gibbs(
             subkey,
             X_B[:, :, :],
             I_B[:],
