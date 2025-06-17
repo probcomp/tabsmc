@@ -197,8 +197,8 @@ def gibbs(key, X_B, I_B, A_one_hot, φ_old, π_old, θ_old, α_pi, α_theta):
     return A_one_hot, φ, π, θ, γ, q
 
 
-@partial(jax.jit, static_argnums=(6, 7, 8))
-def smc_step(key, particles, log_weights, log_gammas, X_B, I_B, C, α_pi, α_theta):
+@jax.jit
+def smc_step(key, particles, w, γ, X_B, I_B, α_pi, α_theta):
     """One step of SMC without rejuvenation.
     
     Args:
@@ -216,10 +216,7 @@ def smc_step(key, particles, log_weights, log_gammas, X_B, I_B, C, α_pi, α_the
         Updated particles, log weights, and log gammas
     """
     A, φ, π, θ = particles
-    P = log_weights.shape[0]
-    
-    # Update weights by subtracting old gamma
-    log_weights = log_weights - log_gammas
+    P = w.shape[0]
     
     # Run Gibbs step for each particle
     keys = jax.random.split(key, P)
@@ -230,40 +227,38 @@ def smc_step(key, particles, log_weights, log_gammas, X_B, I_B, C, α_pi, α_the
     A_new, φ_new, π_new, θ_new, γ_new, q_new = jax.vmap(step_particle)(keys, A, φ, π, θ)
     
     # Update weights: w = w + γ - q
-    log_weights = log_weights + γ_new - q_new
+    w = w + γ_new - γ - q_new
     
     # Normalize weights and compute ESS
-    log_weights_normalized = log_weights - jax.scipy.special.logsumexp(log_weights)
-    weights = jnp.exp(log_weights_normalized)
-    ess = 1.0 / jnp.sum(weights ** 2)
+    w_normalized = w - jax.scipy.special.logsumexp(w)
+    ess = 1.0 / jnp.sum(jnp.exp(w_normalized) ** 2)
     
     # Resample if ESS is too low
     resample_threshold = 0.5 * P
     
     def resample(key):
-        indices = jax.random.choice(key, P, shape=(P,), p=log_weights)
+        indices = jax.random.choice(key, P, shape=(P,), p=w)
         A_resampled = A_new[indices]
         φ_resampled = φ_new[indices]
         π_resampled = π_new[indices]
         θ_resampled = θ_new[indices]
         γ_resampled = γ_new[indices]
-        # Reset weights to uniform after resampling
-        log_weights_resampled = jnp.logsumexp(log_weights) - jnp.log(P)
-        # Reset gammas to zero
-        return (A_resampled, φ_resampled, π_resampled, θ_resampled), log_weights_resampled, γ_resampled
+        w_resampled = jnp.logsumexp(w) - jnp.log(P)
+
+        return (A_resampled, φ_resampled, π_resampled, θ_resampled), w_resampled, γ_resampled
     
     def no_resample(key):
-        return (A_new, φ_new, π_new, θ_new), log_weights, γ_new
+        return (A_new, φ_new, π_new, θ_new), w, γ_new
     
     key, subkey = jax.random.split(key)
-    particles_out, log_weights_out, log_gammas_out = jax.lax.cond(
+    particles_out, w_out, γ_out = jax.lax.cond(
         ess < resample_threshold,
         resample,
         no_resample,
         subkey
     )
     
-    return particles_out, log_weights_out, log_gammas_out
+    return particles_out, w_out, γ_out
 
 
 def smc_no_rejuvenation(key, X, T, P, C, B, α_pi, α_theta):
