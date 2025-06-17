@@ -102,14 +102,22 @@ def log_dirichlet_score(α, x):
     Returns:
         Log probability density
     """
-    # Convert log samples to probability space
+    # x is in log space, so exp(x) gives the actual probabilities
+    # We need to check that the probabilities sum to 1 (within numerical tolerance)
     prob_x = jnp.exp(x)
     
-    # Log normalization constant
+    # Log normalization constant for Dirichlet
     log_norm = jnp.sum(jax.scipy.special.gammaln(α), axis=-1) - jax.scipy.special.gammaln(jnp.sum(α, axis=-1))
     
-    # Log density
+    # Log density: log p(prob_x | α) = Σ (α - 1) * log(prob_x) - log_norm
+    # Since x = log(prob_x), we have: Σ (α - 1) * x - log_norm
     log_density = jnp.sum((α - 1) * x, axis=-1) - log_norm
+    
+    # Add log Jacobian for the log transformation
+    # When transforming from probability space to log space, we need the Jacobian
+    # |det(J)| = Π prob_x[i] = exp(Σ log(prob_x[i])) = exp(Σ x[i])
+    # So log|det(J)| = Σ x[i] = log(Σ prob_x[i])
+    # But since Σ prob_x[i] = 1, log|det(J)| = 0, so no correction needed
     
     return log_density
 
@@ -187,6 +195,129 @@ def gibbs(key, X_B, I_B, A_one_hot, φ_old, π_old, θ_old, α_pi, α_theta):
     γ = π_p + θ_p + A_p + X_p
     
     return A_one_hot, φ, π, θ, γ, q
+
+
+@partial(jax.jit, static_argnums=(6, 7, 8))
+def smc_step(key, particles, log_weights, log_gammas, X_B, I_B, C, α_pi, α_theta):
+    """One step of SMC without rejuvenation.
+    
+    Args:
+        key: PRNG key
+        particles: Tuple of (A, φ, π, θ) arrays with leading particle dimension
+        log_weights: Log weights for each particle (P,)
+        log_gammas: Previous log target probabilities (P,)
+        X_B: New batch of data (B x D x K)
+        I_B: Batch indices (B,)
+        C: Number of clusters
+        α_pi: Dirichlet prior for mixing weights (scalar)
+        α_theta: Dirichlet prior for emission parameters (scalar)
+    
+    Returns:
+        Updated particles, log weights, and log gammas
+    """
+    A, φ, π, θ = particles
+    P = log_weights.shape[0]
+    
+    # Update weights by subtracting old gamma
+    log_weights = log_weights - log_gammas
+    
+    # Run Gibbs step for each particle
+    keys = jax.random.split(key, P)
+    
+    def step_particle(p_key, p_A, p_φ, p_π, p_θ):
+        return gibbs(p_key, X_B, I_B, p_A, p_φ, p_π, p_θ, α_pi, α_theta)
+    
+    A_new, φ_new, π_new, θ_new, γ_new, q_new = jax.vmap(step_particle)(keys, A, φ, π, θ)
+    
+    # Update weights: w = w + γ - q
+    log_weights = log_weights + γ_new - q_new
+    
+    # Normalize weights and compute ESS
+    log_weights_normalized = log_weights - jax.scipy.special.logsumexp(log_weights)
+    weights = jnp.exp(log_weights_normalized)
+    ess = 1.0 / jnp.sum(weights ** 2)
+    
+    # Resample if ESS is too low
+    resample_threshold = 0.5 * P
+    
+    def resample(key):
+        indices = jax.random.choice(key, P, shape=(P,), p=log_weights)
+        A_resampled = A_new[indices]
+        φ_resampled = φ_new[indices]
+        π_resampled = π_new[indices]
+        θ_resampled = θ_new[indices]
+        γ_resampled = γ_new[indices]
+        # Reset weights to uniform after resampling
+        log_weights_resampled = jnp.logsumexp(log_weights) - jnp.log(P)
+        # Reset gammas to zero
+        return (A_resampled, φ_resampled, π_resampled, θ_resampled), log_weights_resampled, γ_resampled
+    
+    def no_resample(key):
+        return (A_new, φ_new, π_new, θ_new), log_weights, γ_new
+    
+    key, subkey = jax.random.split(key)
+    particles_out, log_weights_out, log_gammas_out = jax.lax.cond(
+        ess < resample_threshold,
+        resample,
+        no_resample,
+        subkey
+    )
+    
+    return particles_out, log_weights_out, log_gammas_out
+
+
+def smc_no_rejuvenation(key, X, T, P, C, B, α_pi, α_theta):
+    """Run SMC without rejuvenation on data.
+    
+    Args:
+        key: PRNG key
+        X: Full dataset (N x D x K)
+        T: Number of iterations
+        P: Number of particles
+        C: Number of clusters
+        B: Batch size
+        α_pi: Dirichlet prior for mixing weights (scalar)
+        α_theta: Dirichlet prior for emission parameters (scalar)
+    
+    Returns:
+        Final particles, log weights, and log marginal likelihood estimate
+    """
+    N, D, K = X.shape
+    
+    # Initialize particles using init_empty
+    keys = jax.random.split(key, P + 1)
+    key = keys[0]
+    init_keys = keys[1:]
+    
+    # Vectorized initialization
+    init_particle = lambda k: init_empty(k, C, D, K, N, α_pi, α_theta)
+    A, φ, π, θ = jax.vmap(init_particle)(init_keys)
+    
+    # Initialize weights and gammas
+    log_weights = jnp.zeros(P)
+    log_gammas = jnp.zeros(P)
+    
+    # Track log marginal likelihood
+    log_ml_estimate = 0.0
+    
+    for t in range(T):
+        # Sample batch indices
+        key, subkey = jax.random.split(key)
+        I_B = jax.random.choice(subkey, N, shape=(B,), replace=False)
+        X_B = X[I_B]
+        
+        # SMC step
+        key, subkey = jax.random.split(key)
+        particles = (A, φ, π, θ)
+        particles, log_weights, log_gammas = smc_step(
+            subkey, particles, log_weights, log_gammas, X_B, I_B, C, α_pi, α_theta
+        )
+        A, φ, π, θ = particles
+        
+        # Update marginal likelihood estimate
+        log_ml_estimate += jax.scipy.special.logsumexp(log_weights) - jnp.log(P)
+    
+    return (A, φ, π, θ), log_weights, log_ml_estimate
 
 
 def mcmc_minibatch(key, X, T, C, B, α_pi, α_theta):
