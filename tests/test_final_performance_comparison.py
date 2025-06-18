@@ -146,17 +146,16 @@ def main():
         )
         
         # Test initialization methods
-        key, subkey = jax.random.split(key)
-        test_initialization_methods(subkey, X, test_config["C"], α_pi, α_theta)
+        test_initialization_methods()
         
-        # Test JAX
+        # Test JAX performance
+        start_time = time.time()
         key, subkey = jax.random.split(key)
-        _, jax_time = test_jax_performance(
-            subkey, X, test_config["name"],
-            test_config["T"], test_config["C"], test_config["B"],
-            α_pi, α_theta
-        )
+        mcmc_jax(subkey, X, test_config["T"], test_config["C"], test_config["B"], α_pi, α_theta)
+        jax_time = time.time() - start_time
         jax_times.append(jax_time)
+        
+        print(f"   Time: {jax_time:.3f}s ({jax_time/test_config['T']:.4f}s per iteration)")
         
         # Show efficiency metrics
         data_points = test_config["N"] * test_config["T"]
