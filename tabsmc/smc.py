@@ -11,17 +11,18 @@ from tqdm import tqdm
 
 
 @partial(jax.jit, static_argnums=(1, 2, 3, 4))
-def init_empty(key, C, D, K, N, α_pi, α_theta):
+def init_empty(key, C, D, K, N, α_pi, α_theta, mask=None):
     """Initialize a single particle with empty assignments.
 
     Args:
         key: PRNG key
         C: Number of clusters
         D: Number of features
-        K: Number of categories per feature
+        K: Number of categories per feature (max across all features if mask provided)
         N: Total number of data points
         α_pi: Dirichlet prior for mixing weights (scalar)
         α_theta: Dirichlet prior for emission parameters (scalar)
+        mask: Optional boolean mask (D, K) for valid categories per feature
 
     Returns:
         Tuple of (A, φ, π, θ) for a single particle
@@ -39,30 +40,36 @@ def init_empty(key, C, D, K, N, α_pi, α_theta):
     # Sample θ from Dirichlet prior (in log space)
     key, subkey = jax.random.split(key)
     keys_theta = jax.random.split(subkey, C * D).reshape(C, D, -1)
-    sample_theta = lambda k: jnp.log(jax.random.dirichlet(k, jnp.ones(K) * α_theta))
-    θ = jax.vmap(jax.vmap(sample_theta))(keys_theta)
+    
+    if mask is not None:
+        # Use masked sampling for each feature
+        def sample_theta_masked(k, d):
+            return masked_dirichlet_sample(k, jnp.ones(K) * α_theta, mask[d])
+        
+        θ = jax.vmap(lambda c_keys: jax.vmap(sample_theta_masked)(c_keys, jnp.arange(D)))(keys_theta)
+    else:
+        sample_theta = lambda k: jnp.log(jax.random.dirichlet(k, jnp.ones(K) * α_theta))
+        θ = jax.vmap(jax.vmap(sample_theta))(keys_theta)
 
     return A, φ, π, θ
 
 
 @partial(jax.jit, static_argnums=(2, 3))
-def init_assignments(key, X, C, α_pi, α_theta):
+def init_assignments(key, X, C, α_pi, α_theta, mask=None):
     """Initialize a single particle by sampling assignments and updating parameters.
 
     Args:
         key: PRNG key
         X: Data array (N x D x K) one-hot encoded
         C: Number of clusters
-        D: Number of features
-        K: Number of categories per feature
         α_pi: Dirichlet prior for mixing weights (scalar)
         α_theta: Dirichlet prior for emission parameters (scalar)
+        mask: Optional boolean mask (D, K) for valid categories per feature
 
     Returns:
         Tuple of (A, φ, π, θ) for a single particle
     """
-    D, K = X.shape[1:]
-    N = X.shape[0]
+    N, D, K = X.shape
     
     # Sample π from Dirichlet prior (in log space)
     key, subkey = jax.random.split(key)
@@ -87,45 +94,85 @@ def init_assignments(key, X, C, α_pi, α_theta):
     key, subkey = jax.random.split(key)
     keys_theta = jax.random.split(subkey, C * D).reshape(C, D, -1)
     α_theta_posterior = α_theta + φ
-    sample_theta = lambda k, α: jnp.log(jax.random.dirichlet(k, α))
-    θ = jax.vmap(jax.vmap(sample_theta))(keys_theta, α_theta_posterior)
+    
+    if mask is not None:
+        # Use masked sampling for each feature
+        def sample_theta_masked(k, α_post, d):
+            return masked_dirichlet_sample(k, α_post, mask[d])
+        
+        θ = jax.vmap(lambda c_keys, c_α: jax.vmap(sample_theta_masked)(c_keys, c_α, jnp.arange(D)))(keys_theta, α_theta_posterior)
+    else:
+        sample_theta = lambda k, α: jnp.log(jax.random.dirichlet(k, α))
+        θ = jax.vmap(jax.vmap(sample_theta))(keys_theta, α_theta_posterior)
     
     return A, φ, π, θ
 
 
 @jax.jit
-def log_dirichlet_score(α, x):
+def log_dirichlet_score(α, x, mask=None):
     """Compute log probability density of Dirichlet distribution.
     
     Args:
         α: Concentration parameters (shape: [..., K])
         x: Samples in log space (shape: [..., K])
+        mask: Optional boolean mask (shape: [..., K]) for valid categories
     
     Returns:
         Log probability density
     """
-    # x is in log space, so exp(x) gives the actual probabilities
-    # We need to check that the probabilities sum to 1 (within numerical tolerance)
-    prob_x = jnp.exp(x)
-    
-    # Log normalization constant for Dirichlet
-    log_norm = jnp.sum(jax.scipy.special.gammaln(α), axis=-1) - jax.scipy.special.gammaln(jnp.sum(α, axis=-1))
-    
-    # Log density: log p(prob_x | α) = Σ (α - 1) * log(prob_x) - log_norm
-    # Since x = log(prob_x), we have: Σ (α - 1) * x - log_norm
-    log_density = jnp.sum((α - 1) * x, axis=-1) - log_norm
-    
-    # Add log Jacobian for the log transformation
-    # When transforming from probability space to log space, we need the Jacobian
-    # |det(J)| = Π prob_x[i] = exp(Σ log(prob_x[i])) = exp(Σ x[i])
-    # So log|det(J)| = Σ x[i] = log(Σ prob_x[i])
-    # But since Σ prob_x[i] = 1, log|det(J)| = 0, so no correction needed
+    if mask is not None:
+        # Use original alpha, but only sum over valid categories
+        α_valid = jnp.where(mask, α, 0.0)
+        α_sum = jnp.sum(α_valid, axis=-1)
+        
+        # Log normalization constant (only over valid entries)
+        log_norm = jnp.sum(jnp.where(mask, jax.scipy.special.gammaln(α), 0.0), axis=-1) - jax.scipy.special.gammaln(α_sum)
+        
+        # Log density (only over valid entries)
+        log_density = jnp.sum(jnp.where(mask, (α - 1) * x, 0.0), axis=-1) - log_norm
+    else:
+        # Standard computation without masking
+        log_norm = jnp.sum(jax.scipy.special.gammaln(α), axis=-1) - jax.scipy.special.gammaln(jnp.sum(α, axis=-1))
+        log_density = jnp.sum((α - 1) * x, axis=-1) - log_norm
     
     return log_density
 
 
 @jax.jit
-def gibbs(key, X_B, I_B, A_one_hot, φ_old, π_old, θ_old, α_pi, α_theta):
+def masked_dirichlet_sample(key, α, mask):
+    """Sample from Dirichlet distribution with masking.
+    
+    Args:
+        key: PRNG key
+        α: Concentration parameters (shape: [..., K])
+        mask: Boolean mask (shape: [..., K]) for valid categories
+    
+    Returns:
+        Log probabilities for valid categories, -inf for invalid ones
+    """
+    # Sample gamma random variables
+    gammas = jax.random.gamma(key, α)
+    
+    # Mask out invalid categories (set to 0)
+    gammas_masked = jnp.where(mask, gammas, 0.0)
+    
+    # Normalize over valid categories only
+    gamma_sum = jnp.sum(gammas_masked, axis=-1, keepdims=True)
+    
+    # Avoid division by zero
+    gamma_sum = jnp.where(gamma_sum == 0, 1.0, gamma_sum)
+    
+    # Compute probabilities for valid categories, 0 for invalid
+    probs = jnp.where(mask, gammas_masked / gamma_sum, 0.0)
+    
+    # Convert to log space, using -inf for invalid categories
+    log_probs = jnp.where(mask, jnp.log(jnp.maximum(probs, 1e-10)), -jnp.inf)
+    
+    return log_probs
+
+
+@jax.jit
+def gibbs(key, X_B, I_B, A_one_hot, φ_old, π_old, θ_old, α_pi, α_theta, mask=None):
     """One step of Gibbs sampling for particle Gibbs.
 
     Args:
@@ -138,6 +185,7 @@ def gibbs(key, X_B, I_B, A_one_hot, φ_old, π_old, θ_old, α_pi, α_theta):
         θ_old: Current emission parameters in log space (C x D x K)
         α_pi: Dirichlet prior for mixing weights (scalar)
         α_theta: Dirichlet prior for emission parameters (scalar)
+        mask: Optional boolean mask (D, K) for valid categories per feature
 
     Returns:
         Tuple of (A_one_hot, φ, π, θ, γ, q)
@@ -149,7 +197,19 @@ def gibbs(key, X_B, I_B, A_one_hot, φ_old, π_old, θ_old, α_pi, α_theta):
     keys = jax.random.split(subkey, B)
 
     # Compute log likelihoods and probabilities
-    log_likelihoods = jnp.sum(θ_old[None, :, :, :] * X_B[:, None, :, :], axis=(2, 3))  # B x C
+    # Handle -inf * 0.0 case: when θ is -inf and X is 0, the result should be 0, not nan
+    θ_expanded = θ_old[None, :, :, :]  # 1 x C x D x K
+    X_B_expanded = X_B[:, None, :, :]  # B x 1 x D x K
+    
+    # Use jnp.where to handle -inf * 0.0 case
+    products = jnp.where(
+        X_B_expanded == 0.0,
+        0.0,  # When X is 0, contribution is 0 regardless of θ
+        θ_expanded * X_B_expanded  # When X is not 0, use normal multiplication
+    )
+    
+    log_likelihoods = jnp.sum(products, axis=(2, 3))  # B x C
+    
     log_probs = log_likelihoods + π_old[None, :]  # B x C
     
     # Sample new assignments
@@ -168,7 +228,13 @@ def gibbs(key, X_B, I_B, A_one_hot, φ_old, π_old, θ_old, α_pi, α_theta):
     φ = φ_old + φ_B - φ_B_old  # C x D x K
     
     # Update π
-    counts = jnp.sum(φ, axis=(1, 2))  # C,
+    if mask is not None:
+        # Only count valid categories for cluster counts
+        φ_masked = jnp.where(mask[None, :, :], φ, 0.0)
+        counts = jnp.sum(φ_masked, axis=(1, 2))  # C,
+    else:
+        counts = jnp.sum(φ, axis=(1, 2))  # C,
+    
     α_pi_posterior = α_pi + counts
     key, subkey = jax.random.split(key)
     π = jnp.log(jax.random.dirichlet(subkey, α_pi_posterior))
@@ -178,9 +244,27 @@ def gibbs(key, X_B, I_B, A_one_hot, φ_old, π_old, θ_old, α_pi, α_theta):
     key, subkey = jax.random.split(key)
     keys_theta = jax.random.split(subkey, C * D).reshape(C, D, -1)
     α_theta_posterior = α_theta + φ
-    sample_theta = lambda k, α: jnp.log(jax.random.dirichlet(k, α))
-    θ = jax.vmap(jax.vmap(sample_theta))(keys_theta, α_theta_posterior)
-    θ_pgibbs = jnp.sum(jax.vmap(jax.vmap(log_dirichlet_score))(α_theta_posterior, θ))
+    
+    if mask is not None:
+        # Use masked sampling for each feature
+        def sample_theta_masked(k, α_post, d):
+            return masked_dirichlet_sample(k, α_post, mask[d])
+        
+        θ = jax.vmap(lambda c_keys, c_α: jax.vmap(sample_theta_masked)(c_keys, c_α, jnp.arange(D)))(keys_theta, α_theta_posterior)
+        
+        # Compute log probability with masking - handle potential -inf values
+        def compute_masked_score(c_θ, c_α):
+            def score_for_feature(d):
+                score = log_dirichlet_score(c_α[d], c_θ[d], mask[d])
+                # Replace -inf with large negative number to avoid NaN in sum
+                return jnp.where(jnp.isfinite(score), score, -1e10)
+            return jnp.sum(jax.vmap(score_for_feature)(jnp.arange(D)))
+        
+        θ_pgibbs = jnp.sum(jax.vmap(compute_masked_score)(θ, α_theta_posterior))
+    else:
+        sample_theta = lambda k, α: jnp.log(jax.random.dirichlet(k, α))
+        θ = jax.vmap(jax.vmap(sample_theta))(keys_theta, α_theta_posterior)
+        θ_pgibbs = jnp.sum(jax.vmap(jax.vmap(log_dirichlet_score))(α_theta_posterior, θ))
     
     # Compute proposal log probability
     q = jnp.sum(A_B_pgibbs) + π_pgibbs + θ_pgibbs
@@ -190,9 +274,26 @@ def gibbs(key, X_B, I_B, A_one_hot, φ_old, π_old, θ_old, α_pi, α_theta):
     
     # Compute target log probability
     π_p = log_dirichlet_score(jnp.full(C, α_pi), π)
-    θ_p = jnp.sum(jax.vmap(jax.vmap(lambda t: log_dirichlet_score(jnp.full(K, α_theta), t)))(θ))
+    
+    if mask is not None:
+        # Use masked prior for θ - handle potential -inf values
+        def compute_masked_prior_score(c_θ):
+            def score_for_feature(d):
+                score = log_dirichlet_score(jnp.full(K, α_theta), c_θ[d], mask[d])
+                return jnp.where(jnp.isfinite(score), score, -1e10)
+            return jnp.sum(jax.vmap(score_for_feature)(jnp.arange(D)))
+        
+        θ_p = jnp.sum(jax.vmap(compute_masked_prior_score)(θ))
+        
+        # Only count valid categories in sufficient statistics
+        φ_masked_target = jnp.where(mask[None, :, :], φ, 0.0)
+        θ_masked_target = jnp.where(mask[None, :, :], θ, 0.0)
+        X_p = jnp.sum(θ_masked_target * φ_masked_target)
+    else:
+        θ_p = jnp.sum(jax.vmap(jax.vmap(lambda t: log_dirichlet_score(jnp.full(K, α_theta), t)))(θ))
+        X_p = jnp.sum(θ * φ)
+    
     A_p = jnp.sum(A_one_hot * π[None, :])
-    X_p = jnp.sum(θ * φ)
     
     γ = π_p + θ_p + A_p + X_p
     
@@ -200,7 +301,7 @@ def gibbs(key, X_B, I_B, A_one_hot, φ_old, π_old, θ_old, α_pi, α_theta):
 
 
 @jax.jit
-def smc_step(key, particles, w, γ, X_B, I_B, α_pi, α_theta):
+def smc_step(key, particles, w, γ, X_B, I_B, α_pi, α_theta, mask=None):
     """One step of SMC without rejuvenation.
     
     Args:
@@ -210,9 +311,9 @@ def smc_step(key, particles, w, γ, X_B, I_B, α_pi, α_theta):
         log_gammas: Previous log target probabilities (P,)
         X_B: New batch of data (B x D x K)
         I_B: Batch indices (B,)
-        C: Number of clusters
         α_pi: Dirichlet prior for mixing weights (scalar)
         α_theta: Dirichlet prior for emission parameters (scalar)
+        mask: Optional boolean mask (D, K) for valid categories per feature
     
     Returns:
         Updated particles, log weights, and log gammas
@@ -224,7 +325,7 @@ def smc_step(key, particles, w, γ, X_B, I_B, α_pi, α_theta):
     keys = jax.random.split(key, P)
     
     def step_particle(p_key, p_A, p_φ, p_π, p_θ):
-        return gibbs(p_key, X_B, I_B, p_A, p_φ, p_π, p_θ, α_pi, α_theta)
+        return gibbs(p_key, X_B, I_B, p_A, p_φ, p_π, p_θ, α_pi, α_theta, mask)
     
     A_new, φ_new, π_new, θ_new, γ_new, q_new = jax.vmap(step_particle)(keys, A, φ, π, θ)
     
@@ -263,7 +364,7 @@ def smc_step(key, particles, w, γ, X_B, I_B, α_pi, α_theta):
     return particles_out, w_out, γ_out
 
 
-def smc_no_rejuvenation(key, X, T, P, C, B, α_pi, α_theta, rejuvenation=False, return_history=False):
+def smc_no_rejuvenation(key, X, T, P, C, B, α_pi, α_theta, rejuvenation=False, return_history=False, mask=None):
     """Run SMC with optional rejuvenation on data.
     
     Args:
@@ -277,6 +378,7 @@ def smc_no_rejuvenation(key, X, T, P, C, B, α_pi, α_theta, rejuvenation=False,
         α_theta: Dirichlet prior for emission parameters (scalar)
         rejuvenation: If True, perform rejuvenation step after each SMC step
         return_history: If True, return history of particles at each step
+        mask: Optional boolean mask (D, K) for valid categories per feature
     
     Returns:
         If return_history is False:
@@ -295,7 +397,7 @@ def smc_no_rejuvenation(key, X, T, P, C, B, α_pi, α_theta, rejuvenation=False,
     init_keys = keys[1:]
     
     # Vectorized initialization
-    init_particle = lambda k: init_empty(k, C, D, K, N, α_pi, α_theta)
+    init_particle = lambda k: init_empty(k, C, D, K, N, α_pi, α_theta, mask)
     A, φ, π, θ = jax.vmap(init_particle)(init_keys)
     
     # Initialize weights and gammas
@@ -324,7 +426,7 @@ def smc_no_rejuvenation(key, X, T, P, C, B, α_pi, α_theta, rejuvenation=False,
         key, subkey = jax.random.split(key)
         particles = (A, φ, π, θ)
         particles, log_weights, log_gammas = smc_step(
-            subkey, particles, log_weights, log_gammas, X_B, I_B, α_pi, α_theta
+            subkey, particles, log_weights, log_gammas, X_B, I_B, α_pi, α_theta, mask
         )
         A, φ, π, θ = particles
         
@@ -343,7 +445,7 @@ def smc_no_rejuvenation(key, X, T, P, C, B, α_pi, α_theta, rejuvenation=False,
             def rejuvenate_particle(p_key, p_A, p_φ, p_π, p_θ):
                 # Run gibbs but only return updated parameters
                 A_new, φ_new, π_new, θ_new, _, _ = gibbs(
-                    p_key, X_rejuv, I_rejuv, p_A, p_φ, p_π, p_θ, α_pi, α_theta
+                    p_key, X_rejuv, I_rejuv, p_A, p_φ, p_π, p_θ, α_pi, α_theta, mask
                 )
                 return A_new, φ_new, π_new, θ_new
             
@@ -363,7 +465,7 @@ def smc_no_rejuvenation(key, X, T, P, C, B, α_pi, α_theta, rejuvenation=False,
         return (A, φ, π, θ), log_weights
 
 
-def mcmc_minibatch(key, X, T, C, B, α_pi, α_theta):
+def mcmc_minibatch(key, X, T, C, B, α_pi, α_theta, mask=None):
     """Run MCMC algorithm with minibatches using Gibbs moves.
 
     Args:
@@ -374,6 +476,7 @@ def mcmc_minibatch(key, X, T, C, B, α_pi, α_theta):
         B: Minibatch size
         α_pi: Dirichlet prior for mixing weights (scalar)
         α_theta: Dirichlet prior for emission parameters (scalar)
+        mask: Optional boolean mask (D, K) for valid categories per feature
 
     Returns:
         Final state (A, φ, π, θ)
@@ -382,7 +485,7 @@ def mcmc_minibatch(key, X, T, C, B, α_pi, α_theta):
     
     # Initialize using assignments
     key, subkey = jax.random.split(key)
-    A, φ, π, θ = init_assignments(subkey, X, C, α_pi, α_theta)
+    A, φ, π, θ = init_assignments(subkey, X, C, α_pi, α_theta, mask)
     
     for t in range(T):
         # Sample random batch indices
@@ -393,7 +496,7 @@ def mcmc_minibatch(key, X, T, C, B, α_pi, α_theta):
         # Run Gibbs sampler on the batch
         key, subkey = jax.random.split(key)
         A, φ, π, θ, _, _ = gibbs(
-            subkey, X_B, I_B, A, φ, π, θ, α_pi, α_theta
+            subkey, X_B, I_B, A, φ, π, θ, α_pi, α_theta, mask
         )
     
     return A, φ, π, θ
