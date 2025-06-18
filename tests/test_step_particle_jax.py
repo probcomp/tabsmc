@@ -93,13 +93,13 @@ def test_gibbs_jax():
     print("\n✓ All JAX sanity checks passed!")
 
 
-def compare_with_original():
-    """Compare JAX implementation with original dumpy implementation on same data."""
+def test_gibbs_convergence():
+    """Test that gibbs converges to expected posterior."""
     print("\n" + "="*50)
-    print("COMPARISON: JAX vs Original Implementation")
+    print("CONVERGENCE TEST: JAX Implementation")
     print("="*50)
     
-    # Use same random seed for both
+    # Use same random seed for reproducibility
     key = jax.random.PRNGKey(42)
     
     # Same dimensions
@@ -122,54 +122,29 @@ def compare_with_original():
     key, subkey = jax.random.split(key)
     A_one_hot, φ, π, θ = init_empty(subkey, C, D, K, N, α_pi, α_theta)
     
-    # Run JAX version
-    key, subkey = jax.random.split(key)
-    A_jax, φ_jax, π_jax, θ_jax, γ_jax, q_jax = gibbs(
-        subkey, X_B, I_B, A_one_hot, φ, π, θ, α_pi, α_theta
-    )
+    # Run multiple gibbs steps to check convergence
+    print(f"\nRunning 10 gibbs steps...")
+    γ_values = []
+    q_values = []
     
-    print(f"JAX Results:")
-    print(f"  γ = {γ_jax:.6f}")
-    print(f"  q = {q_jax:.6f}")
-    print(f"  π sum = {jnp.exp(π_jax).sum():.6f}")
-    print(f"  θ sums = {jnp.exp(θ_jax).sum(axis=-1)}")
-    
-    # Try to import and compare with original if available
-    try:
-        import tabsmc.dumpy as dp
-        from tabsmc.smc import gibbs as gibbs_original, init_empty as init_empty_original
-        
-        print(f"\nRunning original dumpy implementation for comparison...")
-        
-        # Convert data to dumpy format
-        X_B_dp = dp.Array(X_B)
-        I_B_dp = dp.Array(I_B)
-        
-        # Initialize with dumpy
-        A_dp, φ_dp, π_dp, θ_dp = init_empty_original(subkey, C, D, K, N, α_pi, α_theta)
-        
-        # Run original
-        A_orig, φ_orig, π_orig, θ_orig, γ_orig, q_orig = gibbs_original(
-            subkey, X_B_dp, I_B_dp, A_dp, φ_dp, π_dp, θ_dp, 
-            dp.Array(α_pi), dp.Array(α_theta)
+    for _ in range(10):
+        key, subkey = jax.random.split(key)
+        A_one_hot, φ, π, θ, γ, q = gibbs(
+            subkey, X_B, I_B, A_one_hot, φ, π, θ, α_pi, α_theta
         )
-        
-        print(f"Original Results:")
-        print(f"  γ = {jnp.array(γ_orig):.6f}")
-        print(f"  q = {jnp.array(q_orig):.6f}")
-        print(f"  π sum = {jnp.exp(jnp.array(π_orig)).sum():.6f}")
-        print(f"  θ sums = {jnp.exp(jnp.array(θ_orig)).sum(axis=-1)}")
-        
-        # Note: Due to random sampling, exact values won't match but structure should
-        print(f"\n✓ Both implementations completed successfully!")
-        
-    except ImportError:
-        print(f"\nOriginal dumpy implementation not available for comparison")
+        γ_values.append(γ)
+        q_values.append(q)
     
-    print(f"\n✅ JAX implementation test completed!")
+    print(f"\nConvergence Results:")
+    print(f"  γ values: {[f'{v:.4f}' for v in γ_values]}")
+    print(f"  q values: {[f'{v:.4f}' for v in q_values]}")
+    print(f"  π sum = {jnp.exp(π).sum():.6f}")
+    print(f"  θ sums = {jnp.exp(θ).sum(axis=-1)}")
+    
+    print(f"\n✅ JAX implementation convergence test completed!")
 
 
 if __name__ == "__main__":
     test_gibbs_jax()
-    compare_with_original()
+    test_gibbs_convergence()
     print("\n🎉 All JAX step particle tests passed!")

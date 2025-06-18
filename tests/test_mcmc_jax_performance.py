@@ -37,7 +37,7 @@ def run_mcmc_chain_jax(key, X, n_samples, C, B, α_pi, α_theta, thinning=1):
     
     # Initialize using init_assignments
     key, subkey = jax.random.split(key)
-    A, φ, π, θ = init_assignments(subkey, X, C, D, K, α_pi, α_theta)
+    A, φ, π, θ = init_assignments(subkey, X, C, α_pi, α_theta)
     
     # Run chain
     sample_idx = 0
@@ -160,27 +160,24 @@ def test_mcmc_jax_performance():
     print(f"Mean π[0]: {np.mean(np.exp(π_samples[:, 0])):.3f} (true: {true_π[0]:.3f})")
     print(f"Std π[0]: {np.std(np.exp(π_samples[:, 0])):.3f}")
     
-    return jax_time, eff_π0, eff_count0
+    # Add assertions for test validation
+    assert jax_time > 0, "JAX MCMC should take some time"
+    assert eff_π0 > 5, f"Effective sample size for π[0] should be reasonable, got {eff_π0:.1f}"
+    assert eff_count0 > 5, f"Effective sample size for counts should be reasonable, got {eff_count0:.1f}"
+    assert 0.2 < np.mean(np.exp(π_samples[:, 0])) < 0.4, "Mean π[0] should be close to true value 0.3"
 
 
-def test_pure_jax_vs_dumpy_performance():
-    """Compare pure JAX vs dumpy performance on same problem."""
+def test_jax_mcmc_main():
+    """Main test for JAX MCMC implementation."""
     print("\n" + "="*60)
-    print("PERFORMANCE COMPARISON: Pure JAX vs Dumpy")
+    print("JAX MCMC PERFORMANCE TEST")
     print("="*60)
     
-    # Test JAX implementation
-    jax_time, jax_eff_π0, jax_eff_count0 = test_mcmc_jax_performance()
+    # Test JAX implementation - this is now just a wrapper test
+    test_mcmc_jax_performance()
     
-    print(f"\n📊 Performance Summary:")
-    print(f"JAX Implementation:")
-    print(f"  Total time: {jax_time:.2f}s")
-    print(f"  Effective sample size π[0]: {jax_eff_π0:.1f}")
-    print(f"  Effective sample size counts: {jax_eff_count0:.1f}")
-    
-    # Note: We could add dumpy comparison here if needed
     print(f"\n✅ JAX implementation is working correctly!")
 
 
 if __name__ == "__main__":
-    test_pure_jax_vs_dumpy_performance()
+    test_jax_mcmc_main()

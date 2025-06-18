@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import time
-from tabsmc.smc import mcmc_minibatch as mcmc_jax, init_assignments as init_jax
+from tabsmc.smc import mcmc_minibatch as mcmc_jax, init_assignments, init_empty
 
 
 def time_function(func, *args, **kwargs):
@@ -53,41 +53,55 @@ def generate_test_data(key, N, D, K, C):
     return X, true_π, true_θ
 
 
-def test_jax_performance(key, X, test_name, T, C, B, α_pi, α_theta):
+def test_jax_performance():
     """Test JAX implementation performance."""
+    key = jax.random.PRNGKey(42)
+    X, true_π, true_θ = generate_test_data(key, N=500, D=3, K=2, C=2)
+    test_name = "Small Scale Test"
+    T, B = 10, 50
+    α_pi, α_theta = 1.0, 1.0
+    
     print(f"\n📊 Testing JAX - {test_name}")
     print(f"   Data: {X.shape}, Iterations: {T}, Batch: {B}")
     
     result, elapsed = time_function(
-        mcmc_jax, key, X, T, C, B, α_pi, α_theta
+        mcmc_jax, key, X, T, 2, B, α_pi, α_theta
     )
     
     print(f"   Time: {elapsed:.3f}s ({elapsed/T:.4f}s per iteration)")
-    return result, elapsed
+    
+    # Add assertions
+    assert elapsed > 0, "Should take some time to run"
+    assert elapsed < 30, "Should complete within reasonable time"
+    assert result is not None, "Should return a result"
 
 
-def test_dumpy_performance(key, X, test_name, T, C, B, α_pi, α_theta):
-    """Test dumpy implementation performance."""
-    try:
-        import tabsmc.dumpy as dp
-        from tabsmc.smc import mcmc_minibatch as mcmc_dumpy
-        
-        print(f"\n📊 Testing Dumpy - {test_name}")
-        print(f"   Data: {X.shape}, Iterations: {T}, Batch: {B}")
-        
-        # Convert to dumpy format
-        X_dp = dp.Array(X)
-        
-        result, elapsed = time_function(
-            mcmc_dumpy, key, X_dp, T, C, B, α_pi, α_theta
-        )
-        
-        print(f"   Time: {elapsed:.3f}s ({elapsed/T:.4f}s per iteration)")
-        return result, elapsed
-        
-    except ImportError:
-        print(f"\n⚠️  Dumpy implementation not available")
-        return None, float('inf')
+def test_initialization_methods():
+    """Test different initialization methods."""
+    key = jax.random.PRNGKey(42)
+    X, _, _ = generate_test_data(key, N=100, D=2, K=3, C=2)
+    C, α_pi, α_theta = 2, 1.0, 1.0
+    
+    print(f"\n📊 Testing Initialization Methods")
+    N, D, K = X.shape
+    
+    # Test init_empty
+    key, subkey = jax.random.split(key)
+    A_empty, φ_empty, π_empty, θ_empty = init_empty(subkey, C, D, K, N, α_pi, α_theta)
+    print(f"   init_empty: A={A_empty.shape}, φ={φ_empty.shape}")
+    
+    # Test init_assignments 
+    key, subkey = jax.random.split(key)
+    A_init, φ_init, π_init, θ_init = init_assignments(subkey, X, C, α_pi, α_theta)
+    print(f"   init_assignments: A={A_init.shape}, φ={φ_init.shape}")
+    
+    # Add assertions
+    assert A_empty.shape == (N, C), f"A_empty shape should be ({N}, {C})"
+    assert φ_empty.shape == (C, D, K), f"φ_empty shape should be ({C}, {D}, {K})"
+    assert A_init.shape == (N, C), f"A_init shape should be ({N}, {C})"
+    assert φ_init.shape == (C, D, K), f"φ_init shape should be ({C}, {D}, {K})"
+    assert jnp.all(A_empty == 0), "Empty initialization should be zero"
+    assert jnp.sum(A_init) > 0, "Initialized assignments should have some allocations"
 
 
 def main():
@@ -131,9 +145,13 @@ def main():
             test_config["K"], test_config["C"]
         )
         
+        # Test initialization methods
+        key, subkey = jax.random.split(key)
+        test_initialization_methods(subkey, X, test_config["C"], α_pi, α_theta)
+        
         # Test JAX
         key, subkey = jax.random.split(key)
-        jax_result, jax_time = test_jax_performance(
+        _, jax_time = test_jax_performance(
             subkey, X, test_config["name"],
             test_config["T"], test_config["C"], test_config["B"],
             α_pi, α_theta

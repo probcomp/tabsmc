@@ -47,7 +47,7 @@ def test_init_assignments():
     X = jax.random.choice(subkey, 2, shape=(N, D, K))
     X = jax.nn.one_hot(X[:, :, 0], K)  # Convert to one-hot
     
-    A, φ, π, θ = init_assignments(key, X, C, D, K, α_pi, α_theta)
+    A, φ, π, θ = init_assignments(key, X, C, α_pi, α_theta)
     
     # Check shapes
     assert A.shape == (N, C)
@@ -140,7 +140,7 @@ def test_performance_comparison():
     
     # Time init_assignments
     start_time = time.time()
-    A, φ, π, θ = init_assignments(key, X, C, D, K, α_pi, α_theta)
+    A, φ, π, θ = init_assignments(key, X, C, α_pi, α_theta)
     init_time = time.time() - start_time
     
     # Time a few gibbs steps

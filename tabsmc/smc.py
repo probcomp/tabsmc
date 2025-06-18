@@ -7,6 +7,7 @@ This module provides a high-performance JAX implementation without the dumpy ove
 import jax
 import jax.numpy as jnp
 from functools import partial
+from tqdm import tqdm
 
 
 @partial(jax.jit, static_argnums=(1, 2, 3, 4))
@@ -44,8 +45,8 @@ def init_empty(key, C, D, K, N, α_pi, α_theta):
     return A, φ, π, θ
 
 
-@partial(jax.jit, static_argnums=(2, 3, 4))
-def init_assignments(key, X, C, D, K, α_pi, α_theta):
+@partial(jax.jit, static_argnums=(2, 3))
+def init_assignments(key, X, C, α_pi, α_theta):
     """Initialize a single particle by sampling assignments and updating parameters.
 
     Args:
@@ -60,6 +61,7 @@ def init_assignments(key, X, C, D, K, α_pi, α_theta):
     Returns:
         Tuple of (A, φ, π, θ) for a single particle
     """
+    D, K = X.shape[1:]
     N = X.shape[0]
     
     # Sample π from Dirichlet prior (in log space)
@@ -237,13 +239,13 @@ def smc_step(key, particles, w, γ, X_B, I_B, α_pi, α_theta):
     resample_threshold = 0.5 * P
     
     def resample(key):
-        indices = jax.random.choice(key, P, shape=(P,), p=w)
+        indices = jax.random.choice(key, P, shape=(P,), p=jnp.exp(w_normalized))
         A_resampled = A_new[indices]
         φ_resampled = φ_new[indices]
         π_resampled = π_new[indices]
         θ_resampled = θ_new[indices]
         γ_resampled = γ_new[indices]
-        w_resampled = jnp.logsumexp(w) - jnp.log(P)
+        w_resampled = jnp.full(P, -jnp.log(P))  # Uniform weights in log space
 
         return (A_resampled, φ_resampled, π_resampled, θ_resampled), w_resampled, γ_resampled
     
@@ -261,8 +263,8 @@ def smc_step(key, particles, w, γ, X_B, I_B, α_pi, α_theta):
     return particles_out, w_out, γ_out
 
 
-def smc_no_rejuvenation(key, X, T, P, C, B, α_pi, α_theta):
-    """Run SMC without rejuvenation on data.
+def smc_no_rejuvenation(key, X, T, P, C, B, α_pi, α_theta, rejuvenation=False, return_history=False):
+    """Run SMC with optional rejuvenation on data.
     
     Args:
         key: PRNG key
@@ -273,11 +275,19 @@ def smc_no_rejuvenation(key, X, T, P, C, B, α_pi, α_theta):
         B: Batch size
         α_pi: Dirichlet prior for mixing weights (scalar)
         α_theta: Dirichlet prior for emission parameters (scalar)
+        rejuvenation: If True, perform rejuvenation step after each SMC step
+        return_history: If True, return history of particles at each step
     
     Returns:
-        Final particles, log weights, and log marginal likelihood estimate
+        If return_history is False:
+            Final particles and log weights
+        If return_history is True:
+            Final particles, log weights, and history
     """
     N, D, K = X.shape
+    
+    # Ensure we have enough data for all batches
+    assert N >= B * T, f"Dataset too small: N={N} must be >= B*T={B*T}"
     
     # Initialize particles using init_empty
     keys = jax.random.split(key, P + 1)
@@ -292,27 +302,65 @@ def smc_no_rejuvenation(key, X, T, P, C, B, α_pi, α_theta):
     log_weights = jnp.zeros(P)
     log_gammas = jnp.zeros(P)
     
-    # Track log marginal likelihood
-    log_ml_estimate = 0.0
+    # Initialize history if needed
+    if return_history:
+        # Pre-allocate arrays for history
+        history = {
+            'A': jnp.zeros((T, P, N, C)),
+            'phi': jnp.zeros((T, P, C, D, K)),
+            'pi': jnp.zeros((T, P, C)),
+            'theta': jnp.zeros((T, P, C, D, K)),
+            'log_weights': jnp.zeros((T, P))
+        }
     
-    for t in range(T):
-        # Sample batch indices
-        key, subkey = jax.random.split(key)
-        I_B = jax.random.choice(subkey, N, shape=(B,), replace=False)
+    for t in tqdm(range(T)):
+        # Deterministic batch indices (no wrap-around)
+        start_idx = t * B
+        end_idx = start_idx + B
+        I_B = jnp.arange(start_idx, end_idx)
         X_B = X[I_B]
         
         # SMC step
         key, subkey = jax.random.split(key)
         particles = (A, φ, π, θ)
         particles, log_weights, log_gammas = smc_step(
-            subkey, particles, log_weights, log_gammas, X_B, I_B, C, α_pi, α_theta
+            subkey, particles, log_weights, log_gammas, X_B, I_B, α_pi, α_theta
         )
         A, φ, π, θ = particles
         
-        # Update marginal likelihood estimate
-        log_ml_estimate += jax.scipy.special.logsumexp(log_weights) - jnp.log(P)
+        
+        # Rejuvenation step if enabled
+        if rejuvenation:
+            # Sample a new batch for rejuvenation
+            key, subkey = jax.random.split(key)
+            I_rejuv = jax.random.choice(subkey, N, shape=(B,), replace=False)
+            X_rejuv = X[I_rejuv]
+            
+            # Run Gibbs step for each particle (updates parameters but not weights/gammas)
+            key, subkey = jax.random.split(key)
+            keys = jax.random.split(subkey, P)
+            
+            def rejuvenate_particle(p_key, p_A, p_φ, p_π, p_θ):
+                # Run gibbs but only return updated parameters
+                A_new, φ_new, π_new, θ_new, _, _ = gibbs(
+                    p_key, X_rejuv, I_rejuv, p_A, p_φ, p_π, p_θ, α_pi, α_theta
+                )
+                return A_new, φ_new, π_new, θ_new
+            
+            A, φ, π, θ = jax.vmap(rejuvenate_particle)(keys, A, φ, π, θ)
+        
+        # Store history if requested
+        if return_history:
+            history['A'] = history['A'].at[t].set(A)
+            history['phi'] = history['phi'].at[t].set(φ)
+            history['pi'] = history['pi'].at[t].set(π)
+            history['theta'] = history['theta'].at[t].set(θ)
+            history['log_weights'] = history['log_weights'].at[t].set(log_weights)
     
-    return (A, φ, π, θ), log_weights, log_ml_estimate
+    if return_history:
+        return (A, φ, π, θ), log_weights, history
+    else:
+        return (A, φ, π, θ), log_weights
 
 
 def mcmc_minibatch(key, X, T, C, B, α_pi, α_theta):
@@ -334,7 +382,7 @@ def mcmc_minibatch(key, X, T, C, B, α_pi, α_theta):
     
     # Initialize using assignments
     key, subkey = jax.random.split(key)
-    A, φ, π, θ = init_assignments(subkey, X, C, D, K, α_pi, α_theta)
+    A, φ, π, θ = init_assignments(subkey, X, C, α_pi, α_theta)
     
     for t in range(T):
         # Sample random batch indices
