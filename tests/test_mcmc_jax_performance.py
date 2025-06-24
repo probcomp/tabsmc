@@ -148,7 +148,7 @@ def test_mcmc_jax_performance():
     axes[1, 1].set_ylabel('ACF')
     
     plt.tight_layout()
-    plt.savefig('mcmc_jax_performance.png', dpi=150)
+    plt.savefig('../figures/mcmc_jax_performance.png', dpi=150)
     
     # Print summary statistics
     eff_π0 = n_samples / (1 + 2 * np.sum(π0_acf[1:]))

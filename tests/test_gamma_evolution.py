@@ -191,7 +191,7 @@ ax4.set_title('Final particle weights')
 ax4.grid(True, alpha=0.3, axis='y')
 
 plt.tight_layout()
-plt.savefig('gamma_evolution.png', dpi=150)
+plt.savefig('../figures/gamma_evolution.png', dpi=150)
 plt.show()
 
 # Print summary statistics
@@ -218,7 +218,7 @@ plt.title('γ/N evolution for individual particles')
 plt.legend()
 plt.grid(True, alpha=0.3)
 plt.tight_layout()
-plt.savefig('gamma_per_n_particles.png', dpi=150)
+plt.savefig('../figures/gamma_per_n_particles.png', dpi=150)
 plt.show()
 
 print("\nPlots saved as 'gamma_evolution.png' and 'gamma_per_n_particles.png'")

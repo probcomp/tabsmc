@@ -209,7 +209,7 @@ ax.legend()
 ax.grid(True, alpha=0.3)
 
 plt.tight_layout()
-plt.savefig('marginal_likelihood_evolution.png', dpi=150)
+plt.savefig('../figures/marginal_likelihood_evolution.png', dpi=150)
 plt.show()
 
 # Print summary

@@ -96,7 +96,7 @@ plt.title('Convergence of γ/N for different dataset sizes', fontsize=14)
 plt.legend(fontsize=12)
 plt.grid(True, alpha=0.3)
 plt.tight_layout()
-plt.savefig('gamma_convergence_comparison.png', dpi=150)
+plt.savefig('../figures/gamma_convergence_comparison.png', dpi=150)
 plt.show()
 
 # Also create a plot showing the theoretical convergence
