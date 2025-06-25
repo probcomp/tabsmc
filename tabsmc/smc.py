@@ -9,6 +9,9 @@ import jax.numpy as jnp
 from functools import partial
 from tqdm import tqdm
 
+# Define empty assignment constant - use a large but safe value
+EMPTY_ASSIGNMENT = 999999  # Large enough to be outside valid cluster range, small enough to avoid overflow
+
 
 @partial(jax.jit, static_argnums=(1, 2, 3, 4))
 def init_empty(key, C, D, K, N, α_pi, α_theta, mask=None):
@@ -27,9 +30,9 @@ def init_empty(key, C, D, K, N, α_pi, α_theta, mask=None):
     Returns:
         Tuple of (A, φ, π, θ) for a single particle
     """
-    # Initialize empty assignments - use int indices for maximum memory efficiency
-    # A[n] = c means data point n is assigned to cluster c
-    A = jnp.zeros(N, dtype=jnp.int32)  # Shape: (N,) instead of (N, C)
+    # Initialize empty assignments - use uint with max value as empty indicator
+    # A[n] = c means data point n is assigned to cluster c, A[n] = EMPTY_ASSIGNMENT means unassigned
+    A = jnp.full(N, EMPTY_ASSIGNMENT, dtype=jnp.uint32)  # Shape: (N,) with EMPTY_ASSIGNMENT indicating unassigned
 
     # Initialize zero sufficient statistics
     φ = jnp.zeros((C, D, K))
@@ -79,7 +82,7 @@ def init_assignments(key, X, C, α_pi, α_theta, mask=None):
     # Sample initial assignments A from categorical(π) - store as indices
     key, subkey = jax.random.split(key)
     keys_A = jax.random.split(subkey, N)
-    A = jax.vmap(lambda k: jax.random.categorical(k, π))(keys_A)  # Shape: (N,)
+    A = jax.vmap(lambda k: jax.random.categorical(k, π))(keys_A).astype(jnp.uint32)  # Shape: (N,)
     
     # Compute sufficient statistics φ using integer indices (vectorized)
     # φ[c,d,k] = sum over n where A[n] == c: X[n,d,k]
@@ -216,20 +219,16 @@ def gibbs(key, X_B, I_B, A_indices, φ_old, π_old, θ_old, α_pi, α_theta, mas
     log_probs = log_likelihoods + π_old[None, :]  # B x C
     
     # Sample new assignments
-    A_B_new = jax.vmap(lambda k, lp: jax.random.categorical(k, lp))(keys, log_probs)
+    A_B_new = jax.vmap(lambda k, lp: jax.random.categorical(k, lp))(keys, log_probs).astype(jnp.uint32)
     
     # Compute proposal probability
     A_B_pgibbs = log_probs[jnp.arange(B), A_B_new]  # B,
     
-    # Get old assignments for the batch
-    A_B_old = A_indices[I_B]  # B,
-    
     # Update sufficient statistics using one-hot encoding temporarily
+    # Note: φ_old should already have the current batch unassigned before calling gibbs
     A_B_new_one_hot = jax.nn.one_hot(A_B_new, C)  # B x C
-    A_B_old_one_hot = jax.nn.one_hot(A_B_old, C)  # B x C
     φ_B_new = jnp.einsum('bc,bdk->cdk', A_B_new_one_hot, X_B)  # C x D x K
-    φ_B_old = jnp.einsum('bc,bdk->cdk', A_B_old_one_hot, X_B)  # C x D x K
-    φ = φ_old + φ_B_new - φ_B_old  # C x D x K
+    φ = φ_old + φ_B_new  # C x D x K (only addition, no subtraction)
     
     # Update π
     if mask is not None:
@@ -297,8 +296,11 @@ def gibbs(key, X_B, I_B, A_indices, φ_old, π_old, θ_old, α_pi, α_theta, mas
         θ_p = jnp.sum(jax.vmap(jax.vmap(lambda t: log_dirichlet_score(jnp.full(K, α_theta), t)))(θ))
         X_p = jnp.sum(θ * φ)
     
-    # Compute A_p using integer indices
-    A_p = jnp.sum(π[A_indices])
+    # Compute A_p using integer indices (only for assigned data points)
+    assigned_mask = A_indices != EMPTY_ASSIGNMENT
+    A_indices_assigned = jnp.where(assigned_mask, A_indices, 0)  # Replace empty with 0 for indexing
+    π_values = π[A_indices_assigned]  # Get π values
+    A_p = jnp.sum(jnp.where(assigned_mask, π_values, 0.0))  # Only sum assigned points
     
     γ = π_p + θ_p + A_p + X_p
     
@@ -330,7 +332,22 @@ def smc_step(key, particles, w, γ, X_B, I_B, α_pi, α_theta, mask=None):
     keys = jax.random.split(key, P)
     
     def step_particle(p_key, p_A, p_φ, p_π, p_θ):
-        return gibbs(p_key, X_B, I_B, p_A, p_φ, p_π, p_θ, α_pi, α_theta, mask)
+        # SMC steps process new data that starts unassigned (EMPTY_ASSIGNMENT)
+        # Only unassign data points that are actually assigned before calling gibbs
+        C_local = p_π.shape[0]  # Get number of clusters from π
+        A_B_old = p_A[I_B]  # Get current assignments for batch
+        
+        # Only unassign data points that are actually assigned (not EMPTY_ASSIGNMENT)
+        assigned_mask = A_B_old != EMPTY_ASSIGNMENT  # Boolean mask for assigned points
+        A_B_old_assigned = jnp.where(assigned_mask, A_B_old, 0)  # Replace empty with 0 for one_hot
+        
+        # Create one-hot only for assigned points
+        A_B_old_one_hot = jax.nn.one_hot(A_B_old_assigned, C_local)  # Convert to one-hot
+        A_B_old_one_hot = jnp.where(assigned_mask[:, None], A_B_old_one_hot, 0.0)  # Zero out empty assignments
+        
+        φ_B_old = jnp.einsum('bc,bdk->cdk', A_B_old_one_hot, X_B)  # Compute old contributions
+        p_φ_unassigned = p_φ - φ_B_old  # Remove old assignments from φ
+        return gibbs(p_key, X_B, I_B, p_A, p_φ_unassigned, p_π, p_θ, α_pi, α_theta, mask)
     
     A_new, φ_new, π_new, θ_new, γ_new, q_new = jax.vmap(step_particle)(keys, A, φ, π, θ)
     
@@ -448,9 +465,15 @@ def smc_no_rejuvenation(key, X, T, P, C, B, α_pi, α_theta, rejuvenation=False,
             keys = jax.random.split(subkey, P)
             
             def rejuvenate_particle(p_key, p_A, p_φ, p_π, p_θ):
+                # Rejuvenation operates on already-assigned data, so unassign normally
+                C_local = p_π.shape[0]  # Get number of clusters from π
+                A_rejuv_old = p_A[I_rejuv]  # Get current assignments for rejuv batch
+                A_rejuv_old_one_hot = jax.nn.one_hot(A_rejuv_old, C_local)  # Convert to one-hot
+                φ_rejuv_old = jnp.einsum('bc,bdk->cdk', A_rejuv_old_one_hot, X_rejuv)  # Compute old contributions
+                p_φ_unassigned = p_φ - φ_rejuv_old  # Remove old assignments from φ
                 # Run gibbs but only return updated parameters
                 A_new, φ_new, π_new, θ_new, _, _ = gibbs(
-                    p_key, X_rejuv, I_rejuv, p_A, p_φ, p_π, p_θ, α_pi, α_theta, mask
+                    p_key, X_rejuv, I_rejuv, p_A, p_φ_unassigned, p_π, p_θ, α_pi, α_theta, mask
                 )
                 return A_new, φ_new, π_new, θ_new
             
@@ -486,22 +509,28 @@ def mcmc_minibatch(key, X, T, C, B, α_pi, α_theta, mask=None):
     Returns:
         Final state (A, φ, π, θ)
     """
-    N, D, K = X.shape
+    N, _, _ = X.shape
     
     # Initialize using assignments
     key, subkey = jax.random.split(key)
     A, φ, π, θ = init_assignments(subkey, X, C, α_pi, α_theta, mask)
     
-    for t in range(T):
+    for _ in range(T):
         # Sample random batch indices
         key, subkey = jax.random.split(key)
         I_B = jax.random.choice(subkey, N, shape=(B,), replace=False)
         X_B = X[I_B]
         
+        # MCMC operates on already-assigned data, so unassign normally
+        A_B_old = A[I_B]  # Get current assignments for batch
+        A_B_old_one_hot = jax.nn.one_hot(A_B_old, C)  # Convert to one-hot
+        φ_B_old = jnp.einsum('bc,bdk->cdk', A_B_old_one_hot, X_B)  # Compute old contributions
+        φ_unassigned = φ - φ_B_old  # Remove old assignments from φ
+        
         # Run Gibbs sampler on the batch
         key, subkey = jax.random.split(key)
         A, φ, π, θ, _, _ = gibbs(
-            subkey, X_B, I_B, A, φ, π, θ, α_pi, α_theta, mask
+            subkey, X_B, I_B, A, φ_unassigned, π, θ, α_pi, α_theta, mask
         )
     
     return A, φ, π, θ

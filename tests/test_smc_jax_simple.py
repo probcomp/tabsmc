@@ -21,8 +21,9 @@ def test_init_empty():
     assert π.shape == (C,)
     assert θ.shape == (C, D, K)
     
-    # Check initialization values
-    assert jnp.all(A == 0), "Assignments should be initialized to zero"
+    # Check initialization values  
+    from tabsmc.smc import EMPTY_ASSIGNMENT
+    assert jnp.all(A == EMPTY_ASSIGNMENT), "Assignments should be initialized to EMPTY_ASSIGNMENT"
     assert jnp.all(φ == 0), "Sufficient statistics should be zero"
     
     # Check that π sums to 1 in probability space
@@ -118,10 +119,10 @@ def test_gibbs_basic():
     print(f"  γ (log prob): {γ}")
     print(f"  q (proposal): {q}")
     
-    # Basic sanity checks - temporarily skip these due to NaN issue
-    # assert jnp.isfinite(γ), f"γ should be finite, got {γ}"
-    # assert jnp.isfinite(q), f"q should be finite, got {q}"
-    print(f"WARNING: γ={γ}, q={q} - skipping finite checks for now")
+    # Basic sanity checks - NaN issue has been fixed!
+    assert jnp.isfinite(γ), f"γ should be finite, got {γ}"
+    assert jnp.isfinite(q), f"q should be finite, got {q}"
+    print(f"✅ γ={γ}, q={q} - all values are finite!")
     assert jnp.allclose(jnp.exp(π_new).sum(), 1.0, atol=1e-5), "π should sum to 1"
     assert jnp.allclose(jnp.exp(θ_new).sum(axis=-1), 1.0, atol=1e-5), "θ should sum to 1"
     
