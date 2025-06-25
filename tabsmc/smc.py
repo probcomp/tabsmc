@@ -27,8 +27,8 @@ def init_empty(key, C, D, K, N, α_pi, α_theta, mask=None):
     Returns:
         Tuple of (A, φ, π, θ) for a single particle
     """
-    # Initialize empty assignments (all zeros)
-    A = jnp.zeros((N, C))
+    # Initialize empty assignments (all zeros) - use boolean to save memory
+    A = jnp.zeros((N, C), dtype=jnp.bool_)
 
     # Initialize zero sufficient statistics
     φ = jnp.zeros((C, D, K))
@@ -79,7 +79,7 @@ def init_assignments(key, X, C, α_pi, α_theta, mask=None):
     key, subkey = jax.random.split(key)
     keys_A = jax.random.split(subkey, N)
     A_indices = jax.vmap(lambda k: jax.random.categorical(k, π))(keys_A)
-    A = jax.nn.one_hot(A_indices, C)
+    A = jax.nn.one_hot(A_indices, C, dtype=jnp.bool_)
     
     # Compute sufficient statistics φ
     φ = jnp.einsum('nc,ndk->cdk', A, X)
@@ -214,7 +214,7 @@ def gibbs(key, X_B, I_B, A_one_hot, φ_old, π_old, θ_old, α_pi, α_theta, mas
     
     # Sample new assignments
     A_B_indices = jax.vmap(lambda k, lp: jax.random.categorical(k, lp))(keys, log_probs)
-    A_B_one_hot = jax.nn.one_hot(A_B_indices, C)  # B x C
+    A_B_one_hot = jax.nn.one_hot(A_B_indices, C, dtype=jnp.bool_)  # B x C
     
     # Compute proposal probability
     A_B_pgibbs = jnp.sum(log_probs * A_B_one_hot, axis=1)  # B,

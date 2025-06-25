@@ -3,7 +3,7 @@ import numpy as np
 from jaxtyping import Float, Array
 from os import getenv
 
-ACCESS_TOKEN = "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"
+ACCESS_TOKEN = "REDACTED_TOKEN"
 # getenv("HF_TOKEN")
 
 
