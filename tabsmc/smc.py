@@ -27,8 +27,9 @@ def init_empty(key, C, D, K, N, α_pi, α_theta, mask=None):
     Returns:
         Tuple of (A, φ, π, θ) for a single particle
     """
-    # Initialize empty assignments (all zeros) - use boolean to save memory
-    A = jnp.zeros((N, C), dtype=jnp.bool_)
+    # Initialize empty assignments - use int indices for maximum memory efficiency
+    # A[n] = c means data point n is assigned to cluster c
+    A = jnp.zeros(N, dtype=jnp.int32)  # Shape: (N,) instead of (N, C)
 
     # Initialize zero sufficient statistics
     φ = jnp.zeros((C, D, K))
@@ -75,17 +76,19 @@ def init_assignments(key, X, C, α_pi, α_theta, mask=None):
     key, subkey = jax.random.split(key)
     π = jnp.log(jax.random.dirichlet(subkey, jnp.ones(C) * α_pi))
     
-    # Sample initial assignments A from categorical(π)
+    # Sample initial assignments A from categorical(π) - store as indices
     key, subkey = jax.random.split(key)
     keys_A = jax.random.split(subkey, N)
-    A_indices = jax.vmap(lambda k: jax.random.categorical(k, π))(keys_A)
-    A = jax.nn.one_hot(A_indices, C, dtype=jnp.bool_)
+    A = jax.vmap(lambda k: jax.random.categorical(k, π))(keys_A)  # Shape: (N,)
     
-    # Compute sufficient statistics φ
-    φ = jnp.einsum('nc,ndk->cdk', A, X)
+    # Compute sufficient statistics φ using integer indices (vectorized)
+    # φ[c,d,k] = sum over n where A[n] == c: X[n,d,k]
+    # Use one-hot encoding temporarily for the computation, but keep A as indices
+    A_one_hot = jax.nn.one_hot(A, C)  # Shape: (N, C)
+    φ = jnp.einsum('nc,ndk->cdk', A_one_hot, X)
     
     # Update π using posterior given A
-    counts = jnp.sum(A, axis=0)
+    counts = jnp.bincount(A, length=C)  # Count assignments per cluster
     α_pi_posterior = α_pi + counts
     key, subkey = jax.random.split(key)
     π = jnp.log(jax.random.dirichlet(subkey, α_pi_posterior))
@@ -172,14 +175,14 @@ def masked_dirichlet_sample(key, α, mask):
 
 
 @jax.jit
-def gibbs(key, X_B, I_B, A_one_hot, φ_old, π_old, θ_old, α_pi, α_theta, mask=None):
+def gibbs(key, X_B, I_B, A_indices, φ_old, π_old, θ_old, α_pi, α_theta, mask=None):
     """One step of Gibbs sampling for particle Gibbs.
 
     Args:
         key: PRNG key
         X_B: Minibatch data (B x D x K)
         I_B: Batch indices (B,)
-        A_one_hot: Current assignments (N x C)
+        A_indices: Current assignments as indices (N,)
         φ_old: Current sufficient statistics (C x D x K)
         π_old: Current mixing weights in log space (C,)
         θ_old: Current emission parameters in log space (C x D x K)
@@ -188,7 +191,7 @@ def gibbs(key, X_B, I_B, A_one_hot, φ_old, π_old, θ_old, α_pi, α_theta, mas
         mask: Optional boolean mask (D, K) for valid categories per feature
 
     Returns:
-        Tuple of (A_one_hot, φ, π, θ, γ, q)
+        Tuple of (A_indices, φ, π, θ, γ, q)
     """
     B, D, K = X_B.shape
     C = π_old.shape[0]
@@ -213,19 +216,20 @@ def gibbs(key, X_B, I_B, A_one_hot, φ_old, π_old, θ_old, α_pi, α_theta, mas
     log_probs = log_likelihoods + π_old[None, :]  # B x C
     
     # Sample new assignments
-    A_B_indices = jax.vmap(lambda k, lp: jax.random.categorical(k, lp))(keys, log_probs)
-    A_B_one_hot = jax.nn.one_hot(A_B_indices, C, dtype=jnp.bool_)  # B x C
+    A_B_new = jax.vmap(lambda k, lp: jax.random.categorical(k, lp))(keys, log_probs)
     
     # Compute proposal probability
-    A_B_pgibbs = jnp.sum(log_probs * A_B_one_hot, axis=1)  # B,
+    A_B_pgibbs = log_probs[jnp.arange(B), A_B_new]  # B,
     
     # Get old assignments for the batch
-    A_B_one_hot_old = A_one_hot[I_B]  # B x C
+    A_B_old = A_indices[I_B]  # B,
     
-    # Update sufficient statistics
-    φ_B = jnp.einsum('bc,bdk->cdk', A_B_one_hot, X_B)  # C x D x K
-    φ_B_old = jnp.einsum('bc,bdk->cdk', A_B_one_hot_old, X_B)  # C x D x K
-    φ = φ_old + φ_B - φ_B_old  # C x D x K
+    # Update sufficient statistics using one-hot encoding temporarily
+    A_B_new_one_hot = jax.nn.one_hot(A_B_new, C)  # B x C
+    A_B_old_one_hot = jax.nn.one_hot(A_B_old, C)  # B x C
+    φ_B_new = jnp.einsum('bc,bdk->cdk', A_B_new_one_hot, X_B)  # C x D x K
+    φ_B_old = jnp.einsum('bc,bdk->cdk', A_B_old_one_hot, X_B)  # C x D x K
+    φ = φ_old + φ_B_new - φ_B_old  # C x D x K
     
     # Update π
     if mask is not None:
@@ -270,7 +274,7 @@ def gibbs(key, X_B, I_B, A_one_hot, φ_old, π_old, θ_old, α_pi, α_theta, mas
     q = jnp.sum(A_B_pgibbs) + π_pgibbs + θ_pgibbs
     
     # Update assignments
-    A_one_hot = A_one_hot.at[I_B].set(A_B_one_hot)
+    A_indices = A_indices.at[I_B].set(A_B_new)
     
     # Compute target log probability
     π_p = log_dirichlet_score(jnp.full(C, α_pi), π)
@@ -293,11 +297,12 @@ def gibbs(key, X_B, I_B, A_one_hot, φ_old, π_old, θ_old, α_pi, α_theta, mas
         θ_p = jnp.sum(jax.vmap(jax.vmap(lambda t: log_dirichlet_score(jnp.full(K, α_theta), t)))(θ))
         X_p = jnp.sum(θ * φ)
     
-    A_p = jnp.sum(A_one_hot * π[None, :])
+    # Compute A_p using integer indices
+    A_p = jnp.sum(π[A_indices])
     
     γ = π_p + θ_p + A_p + X_p
     
-    return A_one_hot, φ, π, θ, γ, q
+    return A_indices, φ, π, θ, γ, q
 
 
 @jax.jit
