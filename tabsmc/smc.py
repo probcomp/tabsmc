@@ -214,6 +214,7 @@ def gibbs(key, X_B, I_B, A_indices, φ_old, π_old, θ_old, α_pi, α_theta, mas
         θ_expanded * X_B_expanded  # When X is not 0, use normal multiplication
     )
     
+    
     log_likelihoods = jnp.sum(products, axis=(2, 3))  # B x C
     
     log_probs = log_likelihoods + π_old[None, :]  # B x C
@@ -255,22 +256,25 @@ def gibbs(key, X_B, I_B, A_indices, φ_old, π_old, θ_old, α_pi, α_theta, mas
         
         θ = jax.vmap(lambda c_keys, c_α: jax.vmap(sample_theta_masked)(c_keys, c_α, jnp.arange(D)))(keys_theta, α_theta_posterior)
         
-        # Compute log probability with masking - handle potential -inf values
+        # Compute log probability with masking
         def compute_masked_score(c_θ, c_α):
             def score_for_feature(d):
                 score = log_dirichlet_score(c_α[d], c_θ[d], mask[d])
-                # Replace -inf with large negative number to avoid NaN in sum
                 return jnp.where(jnp.isfinite(score), score, -1e10)
-            return jnp.sum(jax.vmap(score_for_feature)(jnp.arange(D)))
+            
+            feature_scores = jax.vmap(score_for_feature)(jnp.arange(D))
+            return jnp.sum(feature_scores)
         
-        θ_pgibbs = jnp.sum(jax.vmap(compute_masked_score)(θ, α_theta_posterior))
+        cluster_scores = jax.vmap(compute_masked_score)(θ, α_theta_posterior)
+        θ_pgibbs = jnp.sum(cluster_scores)
     else:
         sample_theta = lambda k, α: jnp.log(jax.random.dirichlet(k, α))
         θ = jax.vmap(jax.vmap(sample_theta))(keys_theta, α_theta_posterior)
         θ_pgibbs = jnp.sum(jax.vmap(jax.vmap(log_dirichlet_score))(α_theta_posterior, θ))
     
     # Compute proposal log probability
-    q = jnp.sum(A_B_pgibbs) + π_pgibbs + θ_pgibbs
+    A_B_sum = jnp.sum(A_B_pgibbs)
+    q = A_B_sum + π_pgibbs + θ_pgibbs
     
     # Update assignments
     A_indices = A_indices.at[I_B].set(A_B_new)
@@ -304,7 +308,7 @@ def gibbs(key, X_B, I_B, A_indices, φ_old, π_old, θ_old, α_pi, α_theta, mas
     
     γ = π_p + θ_p + A_p + X_p
     
-    return A_indices, φ, π, θ, γ, q
+    return A_indices, φ, π, θ, γ, q, log_likelihoods
 
 
 @jax.jit
@@ -349,7 +353,7 @@ def smc_step(key, particles, w, γ, X_B, I_B, α_pi, α_theta, mask=None):
         p_φ_unassigned = p_φ - φ_B_old  # Remove old assignments from φ
         return gibbs(p_key, X_B, I_B, p_A, p_φ_unassigned, p_π, p_θ, α_pi, α_theta, mask)
     
-    A_new, φ_new, π_new, θ_new, γ_new, q_new = jax.vmap(step_particle)(keys, A, φ, π, θ)
+    A_new, φ_new, π_new, θ_new, γ_new, q_new, batch_log_liks = jax.vmap(step_particle)(keys, A, φ, π, θ)
     
     # Update weights: w = w + γ - q
     w = w + γ_new - γ - q_new
@@ -368,22 +372,23 @@ def smc_step(key, particles, w, γ, X_B, I_B, α_pi, α_theta, mask=None):
         π_resampled = π_new[indices]
         θ_resampled = θ_new[indices]
         γ_resampled = γ_new[indices]
+        batch_log_liks_resampled = batch_log_liks[indices]
         w_resampled = jnp.full(P, -jnp.log(P))  # Uniform weights in log space
 
-        return (A_resampled, φ_resampled, π_resampled, θ_resampled), w_resampled, γ_resampled
+        return (A_resampled, φ_resampled, π_resampled, θ_resampled), w_resampled, γ_resampled, batch_log_liks_resampled
     
     def no_resample(key):
-        return (A_new, φ_new, π_new, θ_new), w, γ_new
+        return (A_new, φ_new, π_new, θ_new), w, γ_new, batch_log_liks
     
     key, subkey = jax.random.split(key)
-    particles_out, w_out, γ_out = jax.lax.cond(
+    particles_out, w_out, γ_out, batch_log_liks_out = jax.lax.cond(
         ess < resample_threshold,
         resample,
         no_resample,
         subkey
     )
     
-    return particles_out, w_out, γ_out
+    return particles_out, w_out, γ_out, batch_log_liks_out
 
 
 def smc_no_rejuvenation(key, X, T, P, C, B, α_pi, α_theta, rejuvenation=False, return_history=False, mask=None):

@@ -98,14 +98,18 @@ def elbo_loss(params, X_batch, α_pi, α_theta, mask=None):
     # KL divergence for theta
     if mask is not None:
         # Compute KL only for valid categories
-        def masked_kl(log_theta_cd, d):
-            mask_d = mask[d]
-            alpha_d = jnp.where(mask_d, α_theta, 1.0)  # Use 1.0 for invalid (won't contribute)
-            kl = dirichlet_kl_divergence(log_theta_cd, log_theta_cd, alpha_d)
-            # Only return KL if there are valid categories
-            return jnp.where(jnp.sum(mask_d) > 0, kl, 0.0)
+        def masked_kl_for_cluster(log_theta_c):
+            # log_theta_c has shape (D, K)
+            def masked_kl_for_feature(log_theta_cd, d):
+                mask_d = mask[d]
+                alpha_d = jnp.where(mask_d, α_theta, 1.0)  # Use 1.0 for invalid (won't contribute)
+                kl = dirichlet_kl_divergence(log_theta_cd, log_theta_cd, alpha_d)
+                # Only return KL if there are valid categories
+                return jnp.where(jnp.sum(mask_d) > 0, kl, 0.0)
+            
+            return jnp.sum(jax.vmap(masked_kl_for_feature, in_axes=(0, 0))(log_theta_c, jnp.arange(D)))
         
-        kl_theta = jnp.sum(jax.vmap(jax.vmap(masked_kl, in_axes=(0, None)), in_axes=(0, 0))(log_theta, jnp.arange(D)))
+        kl_theta = jnp.sum(jax.vmap(masked_kl_for_cluster)(log_theta))
     else:
         kl_theta_per_cd = jax.vmap(jax.vmap(lambda lt: dirichlet_kl_divergence(lt, lt, jnp.ones(K) * α_theta)))(log_theta)
         kl_theta = jnp.sum(kl_theta_per_cd)

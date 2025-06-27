@@ -4,6 +4,8 @@ from jaxtyping import Float, Array
 from os import getenv
 
 ACCESS_TOKEN = getenv("HF_TOKEN")
+if not ACCESS_TOKEN:
+    raise ValueError("HF_TOKEN environment variable is required for HuggingFace access")
 
 
 def discretize_dataframe(df: pl.DataFrame, n_bins: int = 20):
@@ -111,10 +113,9 @@ def load_data(dataset_path):
         dummies_df, categorical_idxs
     )
 
-    bool_data = np.where(np.any(bool_data, axis=-1)[..., None], bool_data, True)
-    data: Float[Array, "batch_size n_inputs input_dim"] = np.where(
-        bool_data, 0, -np.inf
-    )
+    # Removed the problematic line that was setting all positions to True for missing data
+    # bool_data = np.where(np.any(bool_data, axis=-1)[..., None], bool_data, True)
+    data = np.where(bool_data, 0, -np.inf)
 
     train_data = np.array(data[: len(train_df)])
     test_data = np.array(data[len(train_df) :])
