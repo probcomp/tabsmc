@@ -32,3 +32,25 @@ Thumbs.db
 
 # Project docs
 CLAUDE.md
+
+# Data and results
+data/
+results/
+figures/
+synthetic_data/
+synthetic_data_per_particle/
+temp_scripts/
+paper/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Logs
+*.log
+
+# JAX/CUDA
+*.cuda
+
+# Environment variables
+.env

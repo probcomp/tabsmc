@@ -1,11 +1,8 @@
 import polars as pl
 import numpy as np
-from jaxtyping import Float, Array
 from os import getenv
 
 ACCESS_TOKEN = getenv("HF_TOKEN")
-if not ACCESS_TOKEN:
-    raise ValueError("HF_TOKEN environment variable is required for HuggingFace access")
 
 
 def discretize_dataframe(df: pl.DataFrame, n_bins: int = 20):
@@ -115,10 +112,14 @@ def load_data(dataset_path):
 
     # Removed the problematic line that was setting all positions to True for missing data
     # bool_data = np.where(np.any(bool_data, axis=-1)[..., None], bool_data, True)
-    data = np.where(bool_data, 0, -np.inf)
+    
+    # Convert bool to float32 in-place to save memory
+    data = bool_data.astype(np.float32)
+    data[data == 0] = -np.inf
+    data[data == 1] = 0
 
-    train_data = np.array(data[: len(train_df)])
-    test_data = np.array(data[len(train_df) :])
+    train_data = data[: len(train_df)]  # Use view instead of copy
+    test_data = data[len(train_df) :]   # Use view instead of copy
     mask = np.zeros((len(col_names), max(cat_lenghts)))
     for i, length in enumerate(cat_lenghts):
         mask[i, :length] = 1

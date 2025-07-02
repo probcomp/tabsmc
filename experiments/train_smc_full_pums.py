@@ -60,14 +60,14 @@ def run_smc_full_pums(
     dataset_path="data/lpm/PUMS",
     n_particles=1000,
     n_clusters=10,
-    n_time_steps=50,
     batch_size=200,
     rejuvenation_steps=10,
     alpha_pi=1.0,
     alpha_theta=1.0,
     seed=42,
     output_dir="results",
-    save_every=10
+    save_every=10,
+    n_time_steps=None,
 ):
     """
     Run SMC on full PUMS dataset downloaded from HuggingFace.
@@ -76,7 +76,6 @@ def run_smc_full_pums(
         dataset_path: HuggingFace dataset path (e.g., "data/lpm/PUMS")
         n_particles: Number of particles (recommend ≤2000 based on memory tests)
         n_clusters: Number of mixture components
-        n_time_steps: Number of SMC time steps
         batch_size: Batch size per time step
         rejuvenation_steps: Number of rejuvenation steps per time step
         alpha_pi: Dirichlet prior for mixing weights
@@ -90,6 +89,8 @@ def run_smc_full_pums(
     N_train, D, K = X_train_cpu.shape
     C = n_clusters
     P = n_particles
+    if n_time_steps is None:
+        n_time_steps = N_train // batch_size
     
     print(f"\nExperiment configuration:")
     print(f"  Particles: {P}")
@@ -207,7 +208,9 @@ def run_smc_full_pums(
     # Save final results
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    final_file = output_path / f"smc_pums_final_P{P}_C{C}_T{n_time_steps}_B{batch_size}.pkl"
+    # Extract dataset name from path
+    dataset_name = dataset_path.split("/")[-1].lower()
+    final_file = output_path / f"smc_{dataset_name}_final_P{P}_C{C}_T{n_time_steps}_B{batch_size}.pkl"
     
     with open(final_file, 'wb') as f:
         pickle.dump(results, f)
@@ -225,14 +228,12 @@ def run_smc_full_pums(
 
 def main():
     parser = argparse.ArgumentParser(description="Train SMC on full PUMS dataset from HuggingFace")
-    parser.add_argument("--dataset", type=str, default="data/lpm/PUMS",
-                       help="HuggingFace dataset path (default: data/lpm/PUMS)")
+    parser.add_argument("--dataset", type=str, default="data/lpm/PUMD",
+                       help="HuggingFace dataset path (default: data/lpm/PUMD)")
     parser.add_argument("--particles", "-P", type=int, default=5,
                        help="Number of particles (default: 5, max recommended: 2000)")
     parser.add_argument("--clusters", "-C", type=int, default=500,
                        help="Number of clusters (default: 500)")
-    parser.add_argument("--time-steps", "-T", type=int, default=800,
-                       help="Number of time steps (default: 800)")
     parser.add_argument("--batch-size", "-B", type=int, default=1000,
                        help="Batch size per time step (default: 1000)")
     parser.add_argument("--rejuvenation", "-R", type=int, default=10,
@@ -247,7 +248,8 @@ def main():
                        help="Output directory (default: results)")
     parser.add_argument("--save-every", type=int, default=10,
                        help="Save checkpoint every N steps (default: 10)")
-    
+    parser.add_argument("--n-time-steps", type=int, default=None,
+                       help="Number of time steps (default: None)")
     args = parser.parse_args()
     
     # Run experiment
@@ -255,14 +257,14 @@ def main():
         dataset_path=args.dataset,
         n_particles=args.particles,
         n_clusters=args.clusters,
-        n_time_steps=args.time_steps,
         batch_size=args.batch_size,
         rejuvenation_steps=args.rejuvenation,
         alpha_pi=args.alpha_pi,
         alpha_theta=args.alpha_theta,
         seed=args.seed,
         output_dir=args.output_dir,
-        save_every=args.save_every
+        save_every=args.save_every,
+        n_time_steps=args.n_time_steps
     )
 
 
