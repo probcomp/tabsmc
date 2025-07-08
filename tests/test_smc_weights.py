@@ -30,10 +30,9 @@ def test_smc_weights():
     α_pi = 1.0
     α_theta = 1.0
     
-    # Generate synthetic one-hot data
+    # Generate synthetic data as integer indices
     key, subkey = jax.random.split(key)
-    data_indices = jax.random.randint(subkey, (N, D), 0, K)
-    X = jax.nn.one_hot(data_indices, K)
+    X = jax.random.randint(subkey, (N, D), 0, K)  # Integer indices (N x D)
     
     # Test init_empty
     key, subkey = jax.random.split(key)
@@ -46,7 +45,7 @@ def test_smc_weights():
     X_B = X[I_B]
     
     key, subkey = jax.random.split(key)
-    A_new, φ_new, π_new, θ_new, γ, q = gibbs(
+    A_new, φ_new, π_new, θ_new, γ, q, _ = gibbs(
         subkey, X_B, I_B, A, φ, π, θ, α_pi, α_theta
     )
     
@@ -67,7 +66,7 @@ def test_smc_weights():
     # Run one SMC step
     key, subkey = jax.random.split(key)
     particles = (A_particles, φ_particles, π_particles, θ_particles)
-    particles_new, log_weights_new, log_gammas_new = smc_step(
+    particles_new, log_weights_new, log_gammas_new, _ = smc_step(
         subkey, particles, log_weights, log_gammas, X_B, I_B, α_pi, α_theta
     )
     
@@ -81,7 +80,7 @@ def test_smc_weights():
     
     key, subkey = jax.random.split(key)
     particles_final, log_weights_final = smc_no_rejuvenation(
-        subkey, X, T, P, C, B, α_pi, α_theta
+        subkey, X, T, P, C, B, K, α_pi, α_theta
     )
     
     # Compute log marginal likelihood from weights
@@ -90,25 +89,25 @@ def test_smc_weights():
     # Additional test with larger synthetic dataset
     N_large, D_large, K_large, C_large = 1500, 10, 4, 3  # Increased N to satisfy N >= B*T = 50*20 = 1000
     
-    # Generate larger synthetic dataset
+    # Generate larger synthetic dataset as integer indices
     key, subkey = jax.random.split(key)
-    data_indices_large = jax.random.randint(subkey, (N_large, D_large), 0, K_large)
-    X_large = jax.nn.one_hot(data_indices_large, K_large)
+    X_large = jax.random.randint(subkey, (N_large, D_large), 0, K_large)  # Integer indices
     
     # Run SMC on larger data
     key, subkey = jax.random.split(key)
     particles_large, weights_large = smc_no_rejuvenation(
-        subkey, X_large, T=20, P=16, C=C_large, B=50, α_pi=1.0, α_theta=1.0
+        subkey, X_large, T=20, P=16, C=C_large, B=50, K=K_large, α_pi=1.0, α_theta=1.0
     )
     
     # Compute log marginal likelihood from weights
     log_ml_large = jax.scipy.special.logsumexp(weights_large) - jnp.log(16)
     
     # Assertions
-    assert X.shape == (N, D, K), f"Data shape should be ({N}, {D}, {K})"
-    assert A.shape == (N, C), f"Assignment shape should be ({N}, {C})"
+    assert X.shape == (N, D), f"Data shape should be ({N}, {D})"
+    assert A.shape == (N,), f"Assignment shape should be ({N},)"
     assert φ.shape == (C, D, K), f"Sufficient statistics shape should be ({C}, {D}, {K})"
-    assert jnp.sum(A) == 0, "Empty initialization should have zero assignments"
+    from tabsmc.smc import EMPTY_ASSIGNMENT
+    assert jnp.all(A == EMPTY_ASSIGNMENT), "Empty initialization should have all assignments as EMPTY_ASSIGNMENT"
     assert jnp.sum(φ) == 0, "Empty initialization should have zero sufficient statistics"
     assert jnp.abs(jnp.sum(jnp.exp(π)) - 1.0) < 1e-6, "Mixing weights should sum to 1"
     
@@ -117,7 +116,7 @@ def test_smc_weights():
     assert jnp.isfinite(q), "Proposal log probability should be finite"
     
     # Test SMC step outputs
-    assert A_particles.shape == (P_smc_step, N, C), f"Particle assignments shape should be ({P_smc_step}, {N}, {C})"
+    assert A_particles.shape == (P_smc_step, N), f"Particle assignments shape should be ({P_smc_step}, {N})"
     assert jnp.all(jnp.isfinite(log_weights_new)), "All weights should be finite"
     assert jnp.all(jnp.isfinite(log_gammas_new)), "All log gammas should be finite"
     
@@ -156,10 +155,9 @@ def run_smc_weights_test():
     α_pi = 1.0
     α_theta = 1.0
 
-    # Generate synthetic one-hot data
+    # Generate synthetic data as integer indices
     key, subkey = jax.random.split(key)
-    data_indices = jax.random.randint(subkey, (N, D), 0, K)
-    X = jax.nn.one_hot(data_indices, K)
+    X = jax.random.randint(subkey, (N, D), 0, K)  # Integer indices (N x D)
     print(f"Data shape: {X.shape}")
 
     # Test init_empty
@@ -178,7 +176,7 @@ def run_smc_weights_test():
     X_B = X[I_B]
 
     key, subkey = jax.random.split(key)
-    A_new, φ_new, π_new, θ_new, γ, q = gibbs(
+    A_new, φ_new, π_new, θ_new, γ, q, _ = gibbs(
         subkey, X_B, I_B, A, φ, π, θ, α_pi, α_theta
     )
 
@@ -211,7 +209,7 @@ def run_smc_weights_test():
     # Run one SMC step
     key, subkey = jax.random.split(key)
     particles = (A_particles, φ_particles, π_particles, θ_particles)
-    particles_new, log_weights_new, log_gammas_new = smc_step(
+    particles_new, log_weights_new, log_gammas_new, _ = smc_step(
         subkey, particles, log_weights, log_gammas, X_B, I_B, α_pi, α_theta
     )
 
@@ -228,7 +226,7 @@ def run_smc_weights_test():
 
     key, subkey = jax.random.split(key)
     particles_final, log_weights_final = smc_no_rejuvenation(
-        subkey, X, T, P, C, B, α_pi, α_theta
+        subkey, X, T, P, C, B, K, α_pi, α_theta
     )
 
     # Compute log marginal likelihood from weights
@@ -242,15 +240,14 @@ def run_smc_weights_test():
     print("\\n\\nTesting with larger synthetic dataset...")
     N_large, D_large, K_large, C_large = 1500, 10, 4, 3  # Increased N to satisfy N >= B*T = 50*20 = 1000
 
-    # Generate larger synthetic dataset
+    # Generate larger synthetic dataset as integer indices
     key, subkey = jax.random.split(key)
-    data_indices_large = jax.random.randint(subkey, (N_large, D_large), 0, K_large)
-    X_large = jax.nn.one_hot(data_indices_large, K_large)
+    X_large = jax.random.randint(subkey, (N_large, D_large), 0, K_large)  # Integer indices
 
     # Run SMC on larger data
     key, subkey = jax.random.split(key)
     particles_large, weights_large = smc_no_rejuvenation(
-        subkey, X_large, T=20, P=16, C=C_large, B=50, α_pi=1.0, α_theta=1.0
+        subkey, X_large, T=20, P=16, C=C_large, B=50, K=K_large, α_pi=1.0, α_theta=1.0
     )
 
     # Compute log marginal likelihood from weights

@@ -19,10 +19,9 @@ def test_smc_detailed():
     α_pi = 1.0
     α_theta = 1.0
     
-    # Generate simple synthetic data
+    # Generate simple synthetic data as integer indices
     key, subkey = jax.random.split(key)
-    data_indices = jax.random.randint(subkey, (N, D), 0, K)
-    X = jax.nn.one_hot(data_indices, K)
+    X = jax.random.randint(subkey, (N, D), 0, K)  # Integer indices (N x D)
     
     # Initialize particles
     keys = jax.random.split(key, P + 1)
@@ -44,14 +43,14 @@ def test_smc_detailed():
     # Run one step
     key, subkey = jax.random.split(key)
     particles = (A, φ, π, θ)
-    particles_new, log_weights_new, log_gammas_new = smc_step(
+    particles_new, log_weights_new, log_gammas_new, _ = smc_step(
         subkey, particles, log_weights, log_gammas, X_B, I_B, α_pi, α_theta
     )
     
     # Run SMC
     key, subkey = jax.random.split(key)
     particles_final, weights_final = smc_no_rejuvenation(
-        subkey, X, T=4, P=P, C=C, B=B, α_pi=α_pi, α_theta=α_theta
+        subkey, X, T=4, P=P, C=C, B=B, K=K, α_pi=α_pi, α_theta=α_theta
     )
     
     # Compute log marginal likelihood from weights
@@ -61,8 +60,8 @@ def test_smc_detailed():
     normalized_weight_sum = jnp.sum(jnp.exp(weights_final - jax.scipy.special.logsumexp(weights_final)))
     
     # Assertions
-    assert X.shape == (N, D, K), f"Data shape should be ({N}, {D}, {K})"
-    assert A.shape == (P, N, C), f"Assignment shape should be ({P}, {N}, {C})"
+    assert X.shape == (N, D), f"Data shape should be ({N}, {D})"
+    assert A.shape == (P, N), f"Assignment shape should be ({P}, {N})"
     assert jnp.isfinite(log_ml), "Log marginal likelihood should be finite"
     assert jnp.abs(normalized_weight_sum - 1.0) < 1e-6, "Normalized weights should sum to 1"
     assert jnp.all(jnp.isfinite(weights_final)), "All weights should be finite"
@@ -80,10 +79,9 @@ def run_detailed_smc_test():
     α_pi = 1.0
     α_theta = 1.0
 
-    # Generate simple synthetic data
+    # Generate simple synthetic data as integer indices
     key, subkey = jax.random.split(key)
-    data_indices = jax.random.randint(subkey, (N, D), 0, K)
-    X = jax.nn.one_hot(data_indices, K)
+    X = jax.random.randint(subkey, (N, D), 0, K)  # Integer indices (N x D)
 
     print("Test Case Setup:")
     print(f"N={N} data points, D={D} features, K={K} categories, C={C} clusters")
@@ -125,7 +123,7 @@ def run_detailed_smc_test():
     # Run one step
     key, subkey = jax.random.split(key)
     particles = (A, φ, π, θ)
-    particles_new, log_weights_new, log_gammas_new = smc_step(
+    particles_new, log_weights_new, log_gammas_new, _ = smc_step(
         subkey, particles, log_weights, log_gammas, X_B, I_B, α_pi, α_theta
     )
 
@@ -138,7 +136,7 @@ def run_detailed_smc_test():
     # Manually compute weight update for first particle to verify
     A_0, φ_0, π_0, θ_0 = A[0], φ[0], π[0], θ[0]
     key, subkey = jax.random.split(key)
-    A_0_new, φ_0_new, π_0_new, θ_0_new, γ_0_new, q_0 = gibbs(
+    A_0_new, φ_0_new, π_0_new, θ_0_new, γ_0_new, q_0, _ = gibbs(
         subkey, X_B, I_B, A_0, φ_0, π_0, θ_0, α_pi, α_theta
     )
 
@@ -157,7 +155,7 @@ def run_detailed_smc_test():
     # Run SMC
     key, subkey = jax.random.split(key)
     particles_final, weights_final = smc_no_rejuvenation(
-        subkey, X, T=4, P=P, C=C, B=B, α_pi=α_pi, α_theta=α_theta
+        subkey, X, T=4, P=P, C=C, B=B, K=K, α_pi=α_pi, α_theta=α_theta
     )
 
     # Compute log marginal likelihood from weights

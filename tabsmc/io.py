@@ -8,7 +8,15 @@ ACCESS_TOKEN = getenv("HF_TOKEN")
 def discretize_dataframe(df: pl.DataFrame, n_bins: int = 20):
     schema = make_schema(df)
     categorical_df = df.select(schema["types"]["categorical"])
-    numerical_df = df.select(schema["types"]["numerical"]).with_columns(
+    numerical_df = df.select(schema["types"]["numerical"])
+    
+    # Calculate and store quantiles for numerical columns
+    for col in schema["types"]["numerical"]:
+        quantiles = np.linspace(0, 1, n_bins + 1)
+        quantile_values = [numerical_df[col].quantile(q) for q in quantiles]
+        schema["var_metadata"][col] = {"quantiles": quantile_values, "n_bins": n_bins}
+    
+    numerical_df = numerical_df.with_columns(
         pl.all()
         .qcut(quantiles=n_bins, labels=[str(i) for i in range(n_bins)])
         .name.keep()
@@ -29,8 +37,7 @@ def discretize_dataframe(df: pl.DataFrame, n_bins: int = 20):
     return schema, df, categorical_idxs
 
 
-def to_dummies(df: pl.DataFrame):
-    return df.to_dummies().select(pl.exclude("^.*_null$"))
+# Removed to_dummies function - no longer needed with integer encoding
 
 
 def dummies_to_padded_array(df: pl.DataFrame, categorical_idxs: np.ndarray):
@@ -85,6 +92,58 @@ def make_schema(df: pl.DataFrame):
     return schema
 
 
+def discretize_with_schema(df: pl.DataFrame, schema: dict):
+    """Discretize a dataframe using quantiles from a pre-computed schema."""
+    categorical_df = df.select(schema["types"]["categorical"])
+    numerical_df = df.select(schema["types"]["numerical"])
+    
+    # Discretize numerical columns using schema quantiles
+    for col in schema["types"]["numerical"]:
+        if col in numerical_df.columns:
+            quantiles = schema["var_metadata"][col]["quantiles"]
+            n_bins = schema["var_metadata"][col]["n_bins"]
+            
+            # Create binning expression
+            # Map values to bins based on quantiles
+            bin_expr = pl.lit(n_bins - 1)  # Default to last bin
+            for i in range(n_bins - 1, 0, -1):
+                bin_expr = pl.when(pl.col(col) <= quantiles[i]).then(pl.lit(i - 1)).otherwise(bin_expr)
+            
+            numerical_df = numerical_df.with_columns(
+                bin_expr.alias(col)
+            )
+    
+    # Combine categorical and discretized numerical columns
+    df = pl.concat((categorical_df, numerical_df), how="horizontal")
+    return df
+
+
+def encode_with_schema(df: pl.DataFrame, schema: dict):
+    """Convert categorical variables to integer indices using schema."""
+    result_df = df.clone()
+    
+    # Encode categorical variables
+    for col in schema["types"]["categorical"]:
+        if col in result_df.columns:
+            levels = schema["var_metadata"][col]["levels"]
+            # Create mapping from level to index
+            level_to_idx = {level: idx for idx, level in enumerate(levels)}
+            
+            # Apply mapping using replace
+            result_df = result_df.with_columns(
+                pl.col(col).replace(level_to_idx, default=-1).alias(col)
+            )
+    
+    # Numerical columns (already discretized) just need to be converted to int
+    for col in schema["types"]["numerical"]:
+        if col in result_df.columns:
+            result_df = result_df.with_columns(
+                pl.col(col).cast(pl.Int32).alias(col)
+            )
+    
+    return result_df
+
+
 def from_dummies(df, separator="_"):
     col_exprs = {}
 
@@ -102,25 +161,55 @@ def from_dummies(df, separator="_"):
 
 
 def load_data(dataset_path):
-    train_df, test_df = load_huggingface(dataset_path)
-    df = pl.concat((train_df, test_df), how="vertical")
-    schema, discretized_df, categorical_idxs = discretize_dataframe(df)
-    dummies_df = to_dummies(discretized_df)
-    bool_data, col_names, cat_lenghts = dummies_to_padded_array(
-        dummies_df, categorical_idxs
-    )
-
-    # Removed the problematic line that was setting all positions to True for missing data
-    # bool_data = np.where(np.any(bool_data, axis=-1)[..., None], bool_data, True)
+    """Load data in integer format with proper missing value handling."""
+    from tabsmc.smc import MISSING_VALUE
     
-    # Convert bool to float32 in-place to save memory
-    data = bool_data.astype(np.float32)
-    data[data == 0] = -np.inf
-    data[data == 1] = 0
-
-    train_data = data[: len(train_df)]  # Use view instead of copy
-    test_data = data[len(train_df) :]   # Use view instead of copy
-    mask = np.zeros((len(col_names), max(cat_lenghts)))
-    for i, length in enumerate(cat_lenghts):
-        mask[i, :length] = 1
-    return train_data, test_data, col_names, mask
+    train_df, test_df = load_huggingface(dataset_path)
+    
+    # Process training and test data separately to avoid memory issues
+    print("Processing training data...")
+    train_schema, train_discretized, train_categorical_idxs = discretize_dataframe(train_df)
+    train_encoded = encode_with_schema(train_discretized, train_schema)
+    
+    print("Processing test data...")
+    test_discretized = discretize_with_schema(test_df, train_schema)
+    test_encoded = encode_with_schema(test_discretized, train_schema)
+    
+    # Convert to numpy arrays with proper missing value handling
+    train_data_raw = train_encoded.to_numpy()
+    test_data_raw = test_encoded.to_numpy()
+    
+    # Handle missing values by replacing NaN with MISSING_VALUE
+    train_data_clean = np.where(np.isnan(train_data_raw), MISSING_VALUE, train_data_raw)
+    test_data_clean = np.where(np.isnan(test_data_raw), MISSING_VALUE, test_data_raw)
+    
+    # Convert to uint32 to prevent negative indexing issues
+    train_data = train_data_clean.astype(np.uint32)
+    test_data = test_data_clean.astype(np.uint32)
+    
+    # Get column names
+    col_names = train_encoded.columns
+    
+    # Determine K (max categories per feature)
+    # For each feature, find the maximum valid category index
+    K_values = []
+    for col in col_names:
+        if col in train_schema["types"]["categorical"]:
+            K_col = len(train_schema["var_metadata"][col]["levels"])
+        else:  # numerical
+            K_col = train_schema["var_metadata"][col]["n_bins"]
+        K_values.append(K_col)
+    
+    K = max(K_values)
+    
+    # Create mask for valid categories per feature
+    mask = np.zeros((len(col_names), K), dtype=bool)
+    for i, (col, K_col) in enumerate(zip(col_names, K_values)):
+        mask[i, :K_col] = True
+    
+    print(f"Loaded data shapes: train={train_data.shape}, test={test_data.shape}")
+    print(f"Max categories K: {K}")
+    print(f"Missing values in train: {np.sum(train_data == MISSING_VALUE):,}")
+    print(f"Missing values in test: {np.sum(test_data == MISSING_VALUE):,}")
+    
+    return train_data, test_data, col_names, mask, K

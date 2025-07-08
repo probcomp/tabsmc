@@ -43,12 +43,11 @@ def test_init_assignments():
     N, D, K, C = 50, 3, 2, 2
     α_pi, α_theta = 1.0, 1.0
     
-    # Generate simple synthetic data
+    # Generate simple synthetic data as integer indices
     key, subkey = jax.random.split(key)
-    X = jax.random.choice(subkey, 2, shape=(N, D, K))
-    X = jax.nn.one_hot(X[:, :, 0], K)  # Convert to one-hot
+    X = jax.random.choice(subkey, K, shape=(N, D))  # Integer indices (N x D)
     
-    A, φ, π, θ = init_assignments(key, X, C, α_pi, α_theta)
+    A, φ, π, θ = init_assignments(key, X, C, K, α_pi, α_theta)
     
     # Check shapes - A is now integer indices
     assert A.shape == (N,)
@@ -69,8 +68,13 @@ def test_init_assignments():
     assert jnp.allclose(jnp.sum(θ_probs, axis=-1), 1.0, atol=1e-6), "θ should sum to 1"
     
     # Check that φ is consistent with A and X
-    A_one_hot = jax.nn.one_hot(A, C)  # Convert to one-hot for comparison
-    φ_expected = jnp.einsum('nc,ndk->cdk', A_one_hot, X)
+    # φ[c,d,k] = count of data points where A[n] == c and X[n,d] == k
+    φ_expected = jnp.zeros((C, D, K))
+    for n in range(N):
+        for d in range(D):
+            c = A[n]
+            k = X[n, d]
+            φ_expected = φ_expected.at[c, d, k].add(1.0)
     assert jnp.allclose(φ, φ_expected, atol=1e-6), "φ should be consistent with A and X"
     
     print("✅ init_assignments test passed!")
@@ -87,10 +91,9 @@ def test_gibbs_basic():
     K = 2   # Number of categories per feature
     N = 100 # Total number of data points
     
-    # Create simple minibatch data
+    # Create simple minibatch data as integer indices
     key, subkey = jax.random.split(key)
-    X_B = jax.random.choice(subkey, 2, shape=(B, D))
-    X_B = jax.nn.one_hot(X_B, K)  # Convert to one-hot (B x D x K)
+    X_B = jax.random.choice(subkey, K, shape=(B, D))  # Integer indices (B x D)
     
     # Create batch indices
     key, subkey = jax.random.split(key)
@@ -106,7 +109,7 @@ def test_gibbs_basic():
     print(f"Dimensions: B={B}, C={C}, D={D}, K={K}, N={N}")
     
     # Call gibbs
-    A_indices_new, φ_new, π_new, θ_new, γ, q = gibbs(
+    A_indices_new, φ_new, π_new, θ_new, γ, q, log_liks = gibbs(
         key, X_B, I_B, A_indices, φ, π, θ, α_pi, α_theta
     )
     
@@ -137,14 +140,13 @@ def test_performance_comparison():
     N, D, K, C = 1000, 10, 3, 2
     α_pi, α_theta = 1.0, 1.0
     
-    # Generate data
+    # Generate data as integer indices
     key, subkey = jax.random.split(key)
-    X = jax.random.choice(subkey, K, shape=(N, D))
-    X = jax.nn.one_hot(X, K)
+    X = jax.random.choice(subkey, K, shape=(N, D))  # Integer indices (N x D)
     
     # Time init_assignments
     start_time = time.time()
-    A, φ, π, θ = init_assignments(key, X, C, α_pi, α_theta)
+    A, φ, π, θ = init_assignments(key, X, C, K, α_pi, α_theta)
     init_time = time.time() - start_time
     
     # Time a few gibbs steps
@@ -156,7 +158,7 @@ def test_performance_comparison():
         X_B = X[I_B]
         
         key, subkey = jax.random.split(key)
-        A, φ, π, θ, _, _ = gibbs(subkey, X_B, I_B, A, φ, π, θ, α_pi, α_theta)
+        A, φ, π, θ, _, _, _ = gibbs(subkey, X_B, I_B, A, φ, π, θ, α_pi, α_theta)
     gibbs_time = time.time() - start_time
     
     print(f"JAX Performance:")

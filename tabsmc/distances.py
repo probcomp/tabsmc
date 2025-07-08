@@ -1,12 +1,64 @@
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Bool
+from jaxtyping import Array, Bool, Int
 from functools import partial
 import numpy as np
 import polars as pl
 from scipy.spatial.distance import jensenshannon
 from typing import Union, Optional, Dict, Any
 
+
+def js_distance_integer_matrices(
+    X1: Union[np.ndarray, jnp.ndarray],
+    X2: Union[np.ndarray, jnp.ndarray],
+    epsilon: float = 1e-10
+) -> float:
+    """
+    Compute Jensen-Shannon distance between two integer matrices encoding categorical variables.
+    
+    This is the main function for computing JS distance between datasets where each column
+    represents a categorical variable encoded as integers (0, 1, 2, ..., or -1 for missing).
+    
+    Args:
+        X1: First dataset of shape (n_samples1, n_features), integer encoded categoricals
+        X2: Second dataset of shape (n_samples2, n_features), integer encoded categoricals  
+        epsilon: Small value to avoid log(0) in JS computation
+    
+    Returns:
+        Average Jensen-Shannon distance across all features
+    """
+    X1 = np.array(X1) if isinstance(X1, jnp.ndarray) else X1
+    X2 = np.array(X2) if isinstance(X2, jnp.ndarray) else X2
+    
+    if X1.shape[1] != X2.shape[1]:
+        raise ValueError(f"Number of features must match: {X1.shape[1]} vs {X2.shape[1]}")
+    
+    n_features = X1.shape[1]
+    js_distances = []
+    
+    for i in range(n_features):
+        cats1 = X1[:, i]
+        cats2 = X2[:, i]
+        
+        # Get all unique categories (including -1 for missing values)
+        all_cats = np.unique(np.concatenate([cats1, cats2]))
+        
+        # Compute empirical distributions
+        p1 = np.array([np.mean(cats1 == cat) for cat in all_cats])
+        p2 = np.array([np.mean(cats2 == cat) for cat in all_cats])
+        
+        # Add epsilon to avoid log(0) and normalize
+        p1 = (p1 + epsilon) / np.sum(p1 + epsilon)
+        p2 = (p2 + epsilon) / np.sum(p2 + epsilon)
+        
+        # Compute Jensen-Shannon distance for this feature
+        js_dist = jensenshannon(p1, p2)
+        js_distances.append(js_dist)
+    
+    return np.mean(js_distances)
+
+
+# Legacy functions below (kept for backward compatibility)
 
 # @partial(jax.jit, static_argnames=("batch_size",))
 def js(x: Bool[Array, "n k"], y: Bool[Array, "m k"], batch_size: int = 1000) -> Array:

@@ -12,6 +12,9 @@ from tqdm import tqdm
 # Define empty assignment constant - use a large but safe value
 EMPTY_ASSIGNMENT = 999999  # Large enough to be outside valid cluster range, small enough to avoid overflow
 
+# Define missing value constant for integer indices
+MISSING_VALUE = 99999  # Use large positive integer to represent missing values (avoids negative indexing)
+
 
 @partial(jax.jit, static_argnums=(1, 2, 3, 4))
 def init_empty(key, C, D, K, N, α_pi, α_theta, mask=None):
@@ -58,14 +61,15 @@ def init_empty(key, C, D, K, N, α_pi, α_theta, mask=None):
     return A, φ, π, θ
 
 
-@partial(jax.jit, static_argnums=(2, 3))
-def init_assignments(key, X, C, α_pi, α_theta, mask=None):
+@partial(jax.jit, static_argnums=(2, 3, 4))
+def init_assignments(key, X, C, K, α_pi, α_theta, mask=None):
     """Initialize a single particle by sampling assignments and updating parameters.
 
     Args:
         key: PRNG key
-        X: Data array (N x D x K) one-hot encoded
+        X: Data array (N x D) with integer indices
         C: Number of clusters
+        K: Number of categories per feature (max across all features if mask provided)
         α_pi: Dirichlet prior for mixing weights (scalar)
         α_theta: Dirichlet prior for emission parameters (scalar)
         mask: Optional boolean mask (D, K) for valid categories per feature
@@ -73,7 +77,7 @@ def init_assignments(key, X, C, α_pi, α_theta, mask=None):
     Returns:
         Tuple of (A, φ, π, θ) for a single particle
     """
-    N, D, K = X.shape
+    N, D = X.shape
     
     # Sample π from Dirichlet prior (in log space)
     key, subkey = jax.random.split(key)
@@ -85,10 +89,36 @@ def init_assignments(key, X, C, α_pi, α_theta, mask=None):
     A = jax.vmap(lambda k: jax.random.categorical(k, π))(keys_A).astype(jnp.uint32)  # Shape: (N,)
     
     # Compute sufficient statistics φ using integer indices (vectorized)
-    # φ[c,d,k] = sum over n where A[n] == c: X[n,d,k]
-    # Use one-hot encoding temporarily for the computation, but keep A as indices
-    A_one_hot = jax.nn.one_hot(A, C)  # Shape: (N, C)
-    φ = jnp.einsum('nc,ndk->cdk', A_one_hot, X)
+    # φ[c,d,k] = sum over n where A[n] == c and X[n,d] == k: 1
+    # Handle missing values by not updating φ for missing entries
+    
+    φ = jnp.zeros((C, D, K))
+    
+    # Create masks for valid (non-missing, in-bounds) entries
+    valid_mask = (X != MISSING_VALUE) & (X >= 0) & (X < K)  # Shape: (N, D)
+    
+    # Use vectorized approach to avoid conditional statements in JIT
+    # Create indices for scatter operation
+    n_indices = jnp.arange(N)[:, None]  # Shape: (N, 1)
+    d_indices = jnp.arange(D)[None, :]  # Shape: (1, D)
+    
+    # Broadcast to create full index arrays
+    n_expanded = jnp.broadcast_to(n_indices, (N, D))
+    d_expanded = jnp.broadcast_to(d_indices, (N, D))
+    
+    # Get cluster and category indices
+    cluster_indices = A[n_expanded]  # Shape: (N, D)
+    category_indices = X  # Shape: (N, D)
+    
+    # Use conditional contributions based on validity mask
+    contributions = jnp.where(valid_mask, 1.0, 0.0)
+    
+    # Use at[].add() with vectorized indices
+    φ = φ.at[
+        cluster_indices.flatten(),
+        d_expanded.flatten(),
+        category_indices.flatten()
+    ].add(contributions.flatten())
     
     # Update π using posterior given A
     counts = jnp.bincount(A, length=C)  # Count assignments per cluster
@@ -183,7 +213,7 @@ def gibbs(key, X_B, I_B, A_indices, φ_old, π_old, θ_old, α_pi, α_theta, mas
 
     Args:
         key: PRNG key
-        X_B: Minibatch data (B x D x K)
+        X_B: Minibatch data (B x D) with integer indices
         I_B: Batch indices (B,)
         A_indices: Current assignments as indices (N,)
         φ_old: Current sufficient statistics (C x D x K)
@@ -196,26 +226,42 @@ def gibbs(key, X_B, I_B, A_indices, φ_old, π_old, θ_old, α_pi, α_theta, mas
     Returns:
         Tuple of (A_indices, φ, π, θ, γ, q)
     """
-    B, D, K = X_B.shape
+    B, D = X_B.shape
     C = π_old.shape[0]
+    K = θ_old.shape[2]  # Get K from θ_old shape
     
     key, subkey = jax.random.split(key)
     keys = jax.random.split(subkey, B)
 
-    # Compute log likelihoods and probabilities
-    # Handle -inf * 0.0 case: when θ is -inf and X is 0, the result should be 0, not nan
-    θ_expanded = θ_old[None, :, :, :]  # 1 x C x D x K
-    X_B_expanded = X_B[:, None, :, :]  # B x 1 x D x K
+    # Compute log likelihoods using integer indices
+    # For each data point in batch and each cluster, sum θ[c,d,X_B[b,d]] over d
+    # Handle missing values (MISSING_VALUE) by using log-likelihood 0
     
-    # Use jnp.where to handle -inf * 0.0 case
-    products = jnp.where(
-        X_B_expanded == 0.0,
-        0.0,  # When X is 0, contribution is 0 regardless of θ
-        θ_expanded * X_B_expanded  # When X is not 0, use normal multiplication
-    )
+    # Fully vectorized approach - eliminate all loops
+    # θ_old shape: (C, D, K)
+    # X_B shape: (B, D)
+    # We want to compute: log_likelihoods[b, c] = sum_d θ_old[c, d, X_B[b, d]]
     
+    # Use vmap to vectorize the .at[].get() operation over all dimensions
+    def get_theta_batch_values(theta_k, x_batch):
+        """Get theta values for all batch elements for a single (theta_k, x_batch) pair."""
+        return jax.vmap(lambda x: theta_k.at[x].get(mode='fill', fill_value=0.0))(x_batch)
     
-    log_likelihoods = jnp.sum(products, axis=(2, 3))  # B x C
+    # Vectorize over clusters and features
+    def get_theta_all_clusters_features(theta_cd, x_batch_d):
+        """Get theta values for all clusters and batch elements for all features."""
+        return jax.vmap(jax.vmap(get_theta_batch_values, in_axes=(0, None)), in_axes=(0, 0))(theta_cd, x_batch_d)
+    
+    # Transpose θ_old to (D, C, K) and X_B to (D, B) for easier vectorization
+    theta_dck = θ_old.transpose(1, 0, 2)  # Shape: (D, C, K)
+    X_B_db = X_B.T  # Shape: (D, B)
+    
+    # Get θ values for all features, clusters, and batch elements at once
+    θ_values_dcb = get_theta_all_clusters_features(theta_dck, X_B_db)  # Shape: (D, C, B)
+    
+    # Transpose to (B, C, D) and sum over features (d) to get log likelihoods
+    θ_values_bcd = θ_values_dcb.transpose(2, 1, 0)  # Shape: (B, C, D)
+    log_likelihoods = jnp.sum(θ_values_bcd, axis=2)  # Shape: (B, C)
     
     log_probs = log_likelihoods + π_old[None, :]  # B x C
     
@@ -225,10 +271,38 @@ def gibbs(key, X_B, I_B, A_indices, φ_old, π_old, θ_old, α_pi, α_theta, mas
     # Compute proposal probability
     A_B_pgibbs = log_probs[jnp.arange(B), A_B_new]  # B,
     
-    # Update sufficient statistics using one-hot encoding temporarily
+    # Update sufficient statistics using integer indices
     # Note: φ_old should already have the current batch unassigned before calling gibbs
-    A_B_new_one_hot = jax.nn.one_hot(A_B_new, C)  # B x C
-    φ_B_new = jnp.einsum('bc,bdk->cdk', A_B_new_one_hot, X_B)  # C x D x K
+    # Handle missing values by not updating φ for missing entries
+    
+    φ_B_new = jnp.zeros((C, D, K))
+    
+    # Create masks for valid (non-missing, in-bounds) entries
+    valid_mask = (X_B != MISSING_VALUE) & (X_B >= 0) & (X_B < K)  # Shape: (B, D)
+    
+    # Use vectorized approach to avoid conditional statements in JIT
+    # Create indices for scatter operation
+    b_indices = jnp.arange(B)[:, None]  # Shape: (B, 1)
+    d_indices = jnp.arange(D)[None, :]  # Shape: (1, D)
+    
+    # Broadcast to create full index arrays
+    b_expanded = jnp.broadcast_to(b_indices, (B, D))
+    d_expanded = jnp.broadcast_to(d_indices, (B, D))
+    
+    # Get cluster and category indices
+    cluster_indices = A_B_new[b_expanded]  # Shape: (B, D)
+    category_indices = X_B  # Shape: (B, D)
+    
+    # Use conditional contributions based on validity mask
+    contributions = jnp.where(valid_mask, 1.0, 0.0)
+    
+    # Use at[].add() with vectorized indices
+    φ_B_new = φ_B_new.at[
+        cluster_indices.flatten(),
+        d_expanded.flatten(),
+        category_indices.flatten()
+    ].add(contributions.flatten())
+    
     φ = φ_old + φ_B_new  # C x D x K (only addition, no subtraction)
     
     # Update π
@@ -339,17 +413,46 @@ def smc_step(key, particles, w, γ, X_B, I_B, α_pi, α_theta, mask=None):
         # SMC steps process new data that starts unassigned (EMPTY_ASSIGNMENT)
         # Only unassign data points that are actually assigned before calling gibbs
         C_local = p_π.shape[0]  # Get number of clusters from π
+        B_local, D_local = X_B.shape  # Get batch size and feature count
+        K_local = p_θ.shape[2]  # Get number of categories
         A_B_old = p_A[I_B]  # Get current assignments for batch
         
         # Only unassign data points that are actually assigned (not EMPTY_ASSIGNMENT)
         assigned_mask = A_B_old != EMPTY_ASSIGNMENT  # Boolean mask for assigned points
-        A_B_old_assigned = jnp.where(assigned_mask, A_B_old, 0)  # Replace empty with 0 for one_hot
         
-        # Create one-hot only for assigned points
-        A_B_old_one_hot = jax.nn.one_hot(A_B_old_assigned, C_local)  # Convert to one-hot
-        A_B_old_one_hot = jnp.where(assigned_mask[:, None], A_B_old_one_hot, 0.0)  # Zero out empty assignments
+        # Compute old contributions using integer indices
+        φ_B_old = jnp.zeros((C_local, D_local, K_local))
         
-        φ_B_old = jnp.einsum('bc,bdk->cdk', A_B_old_one_hot, X_B)  # Compute old contributions
+        # Create index arrays for assigned points only
+        d_indices = jnp.arange(D_local)[None, :]
+        
+        # Get cluster and category indices, using 0 for unassigned (will be masked out)
+        cluster_indices = jnp.where(assigned_mask[:, None], A_B_old[:, None], 0)
+        category_indices = X_B
+        
+        # Create contribution mask
+        contribution_mask = assigned_mask[:, None]
+        
+        # Expand for broadcasting
+        cluster_indices_expanded = jnp.broadcast_to(cluster_indices, (B_local, D_local))
+        feature_indices_expanded = jnp.broadcast_to(d_indices, (B_local, D_local))
+        category_indices_expanded = category_indices
+        contribution_mask_expanded = jnp.broadcast_to(contribution_mask, (B_local, D_local))
+        
+        # Handle missing values: only update φ for valid entries
+        valid_data_mask = (X_B != MISSING_VALUE) & (X_B >= 0) & (X_B < K_local)  # Shape: (B_local, D_local)
+        
+        # Combine assignment validity mask with data validity mask
+        final_mask = contribution_mask_expanded & valid_data_mask
+        
+        # Use at[].add() with conditional contributions
+        contributions = jnp.where(final_mask, 1.0, 0.0)
+        φ_B_old = φ_B_old.at[
+            cluster_indices_expanded.flatten(),
+            feature_indices_expanded.flatten(),
+            category_indices_expanded.flatten()
+        ].add(contributions.flatten())
+        φ_B_old = φ_B_old.reshape(C_local, D_local, K_local)
         p_φ_unassigned = p_φ - φ_B_old  # Remove old assignments from φ
         return gibbs(p_key, X_B, I_B, p_A, p_φ_unassigned, p_π, p_θ, α_pi, α_theta, mask)
     
@@ -391,16 +494,17 @@ def smc_step(key, particles, w, γ, X_B, I_B, α_pi, α_theta, mask=None):
     return particles_out, w_out, γ_out, batch_log_liks_out
 
 
-def smc_no_rejuvenation(key, X, T, P, C, B, α_pi, α_theta, rejuvenation=False, return_history=False, mask=None):
+def smc_no_rejuvenation(key, X, T, P, C, B, K, α_pi, α_theta, rejuvenation=False, return_history=False, mask=None):
     """Run SMC with optional rejuvenation on data.
     
     Args:
         key: PRNG key
-        X: Full dataset (N x D x K)
+        X: Full dataset (N x D) with integer indices
         T: Number of iterations
         P: Number of particles
         C: Number of clusters
         B: Batch size
+        K: Number of categories per feature (max across all features if mask provided)
         α_pi: Dirichlet prior for mixing weights (scalar)
         α_theta: Dirichlet prior for emission parameters (scalar)
         rejuvenation: If True, perform rejuvenation step after each SMC step
@@ -413,7 +517,7 @@ def smc_no_rejuvenation(key, X, T, P, C, B, α_pi, α_theta, rejuvenation=False,
         If return_history is True:
             Final particles, log weights, and history
     """
-    N, D, K = X.shape
+    N, D = X.shape
     
     # Ensure we have enough data for all batches
     assert N >= B * T, f"Dataset too small: N={N} must be >= B*T={B*T}"
@@ -435,7 +539,7 @@ def smc_no_rejuvenation(key, X, T, P, C, B, α_pi, α_theta, rejuvenation=False,
     if return_history:
         # Pre-allocate arrays for history
         history = {
-            'A': jnp.zeros((T, P, N, C)),
+            'A': jnp.zeros((T, P, N), dtype=jnp.uint32),  # A is now integer indices
             'phi': jnp.zeros((T, P, C, D, K)),
             'pi': jnp.zeros((T, P, C)),
             'theta': jnp.zeros((T, P, C, D, K)),
@@ -452,7 +556,7 @@ def smc_no_rejuvenation(key, X, T, P, C, B, α_pi, α_theta, rejuvenation=False,
         # SMC step
         key, subkey = jax.random.split(key)
         particles = (A, φ, π, θ)
-        particles, log_weights, log_gammas = smc_step(
+        particles, log_weights, log_gammas, _ = smc_step(
             subkey, particles, log_weights, log_gammas, X_B, I_B, α_pi, α_theta, mask
         )
         A, φ, π, θ = particles
@@ -473,11 +577,38 @@ def smc_no_rejuvenation(key, X, T, P, C, B, α_pi, α_theta, rejuvenation=False,
                 # Rejuvenation operates on already-assigned data, so unassign normally
                 C_local = p_π.shape[0]  # Get number of clusters from π
                 A_rejuv_old = p_A[I_rejuv]  # Get current assignments for rejuv batch
-                A_rejuv_old_one_hot = jax.nn.one_hot(A_rejuv_old, C_local)  # Convert to one-hot
-                φ_rejuv_old = jnp.einsum('bc,bdk->cdk', A_rejuv_old_one_hot, X_rejuv)  # Compute old contributions
+                
+                # Compute old contributions using integer indices
+                B_local, D_local = X_rejuv.shape  # Get batch size and feature count
+                K_local = p_θ.shape[2]  # Get number of categories
+                φ_rejuv_old = jnp.zeros((C_local, D_local, K_local))
+                
+                # Create indices for vectorized update
+                d_indices = jnp.arange(D_local)[None, :]
+                
+                # Expand assignments and data for broadcasting
+                A_rejuv_expanded = A_rejuv_old[:, None]  # Shape: (B, 1)
+                X_rejuv_values = X_rejuv  # Shape: (B, D)
+                
+                # Create full index arrays
+                cluster_indices = jnp.broadcast_to(A_rejuv_expanded, (B_local, D_local))
+                feature_indices = jnp.broadcast_to(d_indices, (B_local, D_local))
+                category_indices = X_rejuv_values
+                
+                # Handle missing values: only update φ for valid entries
+                valid_data_mask = (X_rejuv != MISSING_VALUE) & (X_rejuv >= 0) & (X_rejuv < K_local)
+                
+                # Use at[].add() with vectorized indices, only for valid entries
+                contributions = jnp.where(valid_data_mask, 1.0, 0.0)
+                φ_rejuv_old = φ_rejuv_old.at[
+                    cluster_indices.flatten(),
+                    feature_indices.flatten(),
+                    category_indices.flatten()
+                ].add(contributions.flatten())
+                φ_rejuv_old = φ_rejuv_old.reshape(C_local, D_local, K_local)
                 p_φ_unassigned = p_φ - φ_rejuv_old  # Remove old assignments from φ
                 # Run gibbs but only return updated parameters
-                A_new, φ_new, π_new, θ_new, _, _ = gibbs(
+                A_new, φ_new, π_new, θ_new, _, _, _ = gibbs(
                     p_key, X_rejuv, I_rejuv, p_A, p_φ_unassigned, p_π, p_θ, α_pi, α_theta, mask
                 )
                 return A_new, φ_new, π_new, θ_new
@@ -498,15 +629,16 @@ def smc_no_rejuvenation(key, X, T, P, C, B, α_pi, α_theta, rejuvenation=False,
         return (A, φ, π, θ), log_weights
 
 
-def mcmc_minibatch(key, X, T, C, B, α_pi, α_theta, mask=None):
+def mcmc_minibatch(key, X, T, C, B, K, α_pi, α_theta, mask=None):
     """Run MCMC algorithm with minibatches using Gibbs moves.
 
     Args:
         key: PRNG key
-        X: Full dataset (N x D x K) one-hot encoded
+        X: Full dataset (N x D) with integer indices
         T: Number of iterations
         C: Number of clusters
         B: Minibatch size
+        K: Number of categories per feature (max across all features if mask provided)
         α_pi: Dirichlet prior for mixing weights (scalar)
         α_theta: Dirichlet prior for emission parameters (scalar)
         mask: Optional boolean mask (D, K) for valid categories per feature
@@ -514,11 +646,11 @@ def mcmc_minibatch(key, X, T, C, B, α_pi, α_theta, mask=None):
     Returns:
         Final state (A, φ, π, θ)
     """
-    N, _, _ = X.shape
+    N, _ = X.shape
     
     # Initialize using assignments
     key, subkey = jax.random.split(key)
-    A, φ, π, θ = init_assignments(subkey, X, C, α_pi, α_theta, mask)
+    A, φ, π, θ = init_assignments(subkey, X, C, K, α_pi, α_theta, mask)
     
     for _ in range(T):
         # Sample random batch indices
@@ -528,13 +660,39 @@ def mcmc_minibatch(key, X, T, C, B, α_pi, α_theta, mask=None):
         
         # MCMC operates on already-assigned data, so unassign normally
         A_B_old = A[I_B]  # Get current assignments for batch
-        A_B_old_one_hot = jax.nn.one_hot(A_B_old, C)  # Convert to one-hot
-        φ_B_old = jnp.einsum('bc,bdk->cdk', A_B_old_one_hot, X_B)  # Compute old contributions
+        
+        # Compute old contributions using integer indices
+        B_local, D_local = X_B.shape  # Get batch size and feature count
+        φ_B_old = jnp.zeros((C, D_local, K))
+        
+        # Create indices for vectorized update
+        d_indices = jnp.arange(D_local)[None, :]
+        
+        # Expand assignments and data for broadcasting
+        A_B_old_expanded = A_B_old[:, None]  # Shape: (B, 1)
+        X_B_values = X_B  # Shape: (B, D)
+        
+        # Create full index arrays
+        cluster_indices = jnp.broadcast_to(A_B_old_expanded, (B_local, D_local))
+        feature_indices = jnp.broadcast_to(d_indices, (B_local, D_local))
+        category_indices = X_B_values
+        
+        # Handle missing values: only update φ for valid entries
+        valid_data_mask = (X_B != MISSING_VALUE) & (X_B >= 0) & (X_B < K)
+        
+        # Use at[].add() with vectorized indices, only for valid entries
+        contributions = jnp.where(valid_data_mask, 1.0, 0.0)
+        φ_B_old = φ_B_old.at[
+            cluster_indices.flatten(),
+            feature_indices.flatten(),
+            category_indices.flatten()
+        ].add(contributions.flatten())
+        φ_B_old = φ_B_old.reshape(C, D_local, K)
         φ_unassigned = φ - φ_B_old  # Remove old assignments from φ
         
         # Run Gibbs sampler on the batch
         key, subkey = jax.random.split(key)
-        A, φ, π, θ, _, _ = gibbs(
+        A, φ, π, θ, _, _, _ = gibbs(
             subkey, X_B, I_B, A, φ_unassigned, π, θ, α_pi, α_theta, mask
         )
     
