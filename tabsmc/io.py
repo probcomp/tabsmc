@@ -7,6 +7,9 @@ ACCESS_TOKEN = getenv("HF_TOKEN")
 
 def discretize_dataframe(df: pl.DataFrame, n_bins: int = 20):
     schema = make_schema(df)
+    # Store original column order in schema
+    schema["original_column_order"] = df.columns
+    
     categorical_df = df.select(schema["types"]["categorical"])
     numerical_df = df.select(schema["types"]["numerical"])
     
@@ -16,11 +19,23 @@ def discretize_dataframe(df: pl.DataFrame, n_bins: int = 20):
         quantile_values = [numerical_df[col].quantile(q) for q in quantiles]
         schema["var_metadata"][col] = {"quantiles": quantile_values, "n_bins": n_bins}
     
-    numerical_df = numerical_df.with_columns(
-        pl.all()
-        .qcut(quantiles=n_bins, labels=[str(i) for i in range(n_bins)])
-        .name.keep()
-    )
+    # Use the same binning logic as discretize_with_schema for consistency
+    for col in schema["types"]["numerical"]:
+        if col in numerical_df.columns:
+            quantiles = schema["var_metadata"][col]["quantiles"]
+            n_bins = schema["var_metadata"][col]["n_bins"]
+            
+            # Create binning expression (same as discretize_with_schema)
+            bin_expr = pl.lit(n_bins - 1)  # Default to last bin for non-null values
+            for i in range(n_bins - 1, 0, -1):
+                bin_expr = pl.when(pl.col(col) <= quantiles[i]).then(pl.lit(i - 1)).otherwise(bin_expr)
+            
+            # Assign null values to -1 (missing code), not to a bin
+            bin_expr = pl.when(pl.col(col).is_null()).then(pl.lit(-1)).otherwise(bin_expr)
+            
+            numerical_df = numerical_df.with_columns(
+                bin_expr.alias(col)
+            )
 
     categorical_idxs = np.concatenate(
         [
@@ -33,7 +48,17 @@ def discretize_dataframe(df: pl.DataFrame, n_bins: int = 20):
         ]
     ).astype(np.int32)
 
-    df = pl.concat((categorical_df, numerical_df), how="horizontal")
+    # Preserve original column order
+    if "original_column_order" in schema:
+        df = pl.concat([
+            categorical_df.select([col for col in schema["original_column_order"] if col in categorical_df.columns]),
+            numerical_df.select([col for col in schema["original_column_order"] if col in numerical_df.columns])
+        ], how="horizontal")
+        # Reorder to match original order
+        df = df.select(schema["original_column_order"])
+    else:
+        df = pl.concat((categorical_df, numerical_df), how="horizontal")
+    
     return schema, df, categorical_idxs
 
 
@@ -104,17 +129,30 @@ def discretize_with_schema(df: pl.DataFrame, schema: dict):
             n_bins = schema["var_metadata"][col]["n_bins"]
             
             # Create binning expression
-            # Map values to bins based on quantiles
-            bin_expr = pl.lit(n_bins - 1)  # Default to last bin
+            # Map values to bins based on quantiles, but handle nulls separately
+            bin_expr = pl.lit(n_bins - 1)  # Default to last bin for non-null values
             for i in range(n_bins - 1, 0, -1):
                 bin_expr = pl.when(pl.col(col) <= quantiles[i]).then(pl.lit(i - 1)).otherwise(bin_expr)
+            
+            # Assign null values to -1 (missing code), not to a bin
+            bin_expr = pl.when(pl.col(col).is_null()).then(pl.lit(-1)).otherwise(bin_expr)
             
             numerical_df = numerical_df.with_columns(
                 bin_expr.alias(col)
             )
     
-    # Combine categorical and discretized numerical columns
-    df = pl.concat((categorical_df, numerical_df), how="horizontal")
+    # Preserve original column order if available in schema
+    if "original_column_order" in schema:
+        df = pl.concat([
+            categorical_df.select([col for col in schema["original_column_order"] if col in categorical_df.columns]),
+            numerical_df.select([col for col in schema["original_column_order"] if col in numerical_df.columns])
+        ], how="horizontal")
+        # Reorder to match original order
+        df = df.select(schema["original_column_order"])
+    else:
+        # Fallback to old behavior
+        df = pl.concat((categorical_df, numerical_df), how="horizontal")
+    
     return df
 
 
