@@ -58,6 +58,176 @@ def js_distance_integer_matrices(
     return np.mean(js_distances)
 
 
+def js_distance_pairwise_columns_jax(
+    X1: Union[np.ndarray, jnp.ndarray],
+    X2: Union[np.ndarray, jnp.ndarray],
+    epsilon: float = 1e-10
+) -> jnp.ndarray:
+    """
+    JAX-optimized version of js_distance_pairwise_columns.
+    
+    Compute Jensen-Shannon distances between pairs of columns from two datasets.
+    For each pair of columns (i, j), computes the JS distance between the joint distribution
+    of columns i and j in X1 vs X2.
+    
+    Args:
+        X1: First dataset of shape (n_samples1, n_features), integer encoded categoricals
+        X2: Second dataset of shape (n_samples2, n_features), integer encoded categoricals
+        epsilon: Small value to avoid log(0) in JS computation
+    
+    Returns:
+        Matrix of shape (n_features, n_features) where entry (i,j) is the JS distance
+        between the joint distribution of columns i,j in X1 vs X2
+    """
+    # Convert to JAX arrays
+    X1 = jnp.array(X1, dtype=jnp.int32) if not isinstance(X1, jnp.ndarray) else X1.astype(jnp.int32)
+    X2 = jnp.array(X2, dtype=jnp.int32) if not isinstance(X2, jnp.ndarray) else X2.astype(jnp.int32)
+    
+    if X1.shape[1] != X2.shape[1]:
+        raise ValueError(f"Number of features must match: {X1.shape[1]} vs {X2.shape[1]}")
+    
+    n_features = X1.shape[1]
+    n_samples1 = X1.shape[0]
+    n_samples2 = X2.shape[0]
+    
+    # Pre-compute the maximum value to determine range
+    max_val = int(jnp.maximum(jnp.max(X1), jnp.max(X2)) + 1)
+    
+    # Compute marginal JS distances for diagonal
+    def compute_marginal_js(col_idx):
+        cats1 = X1[:, col_idx]
+        cats2 = X2[:, col_idx]
+        
+        # Create histograms using bincount
+        hist1 = jnp.bincount(cats1, length=max_val).astype(jnp.float32)
+        hist2 = jnp.bincount(cats2, length=max_val).astype(jnp.float32)
+        
+        # Normalize to get probabilities
+        p1 = hist1 / n_samples1
+        p2 = hist2 / n_samples2
+        
+        # Add epsilon and normalize
+        p1 = (p1 + epsilon) / jnp.sum(p1 + epsilon)
+        p2 = (p2 + epsilon) / jnp.sum(p2 + epsilon)
+        
+        # Compute JS distance
+        m = (p1 + p2) / 2
+        kl_pm = jnp.sum(jnp.where(p1 > 0, p1 * jnp.log(p1 / m), 0))
+        kl_qm = jnp.sum(jnp.where(p2 > 0, p2 * jnp.log(p2 / m), 0))
+        
+        return jnp.sqrt((kl_pm + kl_qm) / 2)
+    
+    # Vectorize marginal computation
+    marginal_js = jax.vmap(compute_marginal_js)(jnp.arange(n_features))
+    
+    # Compute joint JS distances for off-diagonal
+    def compute_joint_js(i, j):
+        # Create joint encodings
+        joint1 = X1[:, i] * max_val + X1[:, j]
+        joint2 = X2[:, i] * max_val + X2[:, j]
+        
+        # Create histograms
+        max_joint = max_val * max_val
+        hist1 = jnp.bincount(joint1, length=max_joint).astype(jnp.float32)
+        hist2 = jnp.bincount(joint2, length=max_joint).astype(jnp.float32)
+        
+        # Normalize
+        p1 = hist1 / n_samples1
+        p2 = hist2 / n_samples2
+        
+        # Add epsilon and normalize
+        p1 = (p1 + epsilon) / jnp.sum(p1 + epsilon)
+        p2 = (p2 + epsilon) / jnp.sum(p2 + epsilon)
+        
+        # Compute JS distance
+        m = (p1 + p2) / 2
+        kl_pm = jnp.sum(jnp.where(p1 > 0, p1 * jnp.log(p1 / m), 0))
+        kl_qm = jnp.sum(jnp.where(p2 > 0, p2 * jnp.log(p2 / m), 0))
+        
+        return jnp.sqrt((kl_pm + kl_qm) / 2)
+    
+    # Create result matrix
+    js_matrix = jnp.zeros((n_features, n_features))
+    
+    # Fill diagonal with marginal JS distances
+    js_matrix = js_matrix.at[jnp.diag_indices(n_features)].set(marginal_js)
+    
+    # Compute off-diagonal elements
+    for i in range(n_features):
+        for j in range(i + 1, n_features):
+            js_val = compute_joint_js(i, j)
+            js_matrix = js_matrix.at[i, j].set(js_val)
+            js_matrix = js_matrix.at[j, i].set(js_val)  # Symmetric
+    
+    return js_matrix
+
+
+def js_distance_pairwise_columns(
+    X1: Union[np.ndarray, jnp.ndarray],
+    X2: Union[np.ndarray, jnp.ndarray],
+    epsilon: float = 1e-10
+) -> np.ndarray:
+    """
+    Compute Jensen-Shannon distances between pairs of columns from two datasets.
+    
+    For each pair of columns (i, j), computes the JS distance between the joint distribution
+    of columns i and j in X1 vs X2. Each column represents a categorical variable encoded
+    as integers (0, 1, 2, ..., or -1 for missing).
+    
+    Args:
+        X1: First dataset of shape (n_samples1, n_features), integer encoded categoricals
+        X2: Second dataset of shape (n_samples2, n_features), integer encoded categoricals
+        epsilon: Small value to avoid log(0) in JS computation
+    
+    Returns:
+        Matrix of shape (n_features, n_features) where entry (i,j) is the JS distance
+        between the joint distribution of columns i,j in X1 vs X2
+    """
+    X1 = np.array(X1) if isinstance(X1, jnp.ndarray) else X1
+    X2 = np.array(X2) if isinstance(X2, jnp.ndarray) else X2
+    
+    if X1.shape[1] != X2.shape[1]:
+        raise ValueError(f"Number of features must match: {X1.shape[1]} vs {X2.shape[1]}")
+    
+    n_features = X1.shape[1]
+    js_matrix = np.zeros((n_features, n_features))
+    
+    for i in range(n_features):
+        for j in range(n_features):
+            if i == j:
+                # Diagonal: single column JS distance
+                cats1_i = X1[:, i]
+                cats2_i = X2[:, i]
+                
+                all_cats = np.unique(np.concatenate([cats1_i, cats2_i]))
+                p1 = np.array([np.mean(cats1_i == cat) for cat in all_cats])
+                p2 = np.array([np.mean(cats2_i == cat) for cat in all_cats])
+                
+                p1 = (p1 + epsilon) / np.sum(p1 + epsilon)
+                p2 = (p2 + epsilon) / np.sum(p2 + epsilon)
+                
+                js_matrix[i, j] = jensenshannon(p1, p2)
+            else:
+                # Off-diagonal: joint distribution of columns i and j
+                pairs1 = list(zip(X1[:, i], X1[:, j]))
+                pairs2 = list(zip(X2[:, i], X2[:, j]))
+                
+                # Get all unique pairs
+                all_pairs = list(set(pairs1 + pairs2))
+                
+                # Compute empirical joint distributions
+                p1 = np.array([pairs1.count(pair) / len(pairs1) for pair in all_pairs])
+                p2 = np.array([pairs2.count(pair) / len(pairs2) for pair in all_pairs])
+                
+                # Add epsilon and normalize
+                p1 = (p1 + epsilon) / np.sum(p1 + epsilon)
+                p2 = (p2 + epsilon) / np.sum(p2 + epsilon)
+                
+                js_matrix[i, j] = jensenshannon(p1, p2)
+    
+    return js_matrix
+
+
 # Legacy functions below (kept for backward compatibility)
 
 # @partial(jax.jit, static_argnames=("batch_size",))

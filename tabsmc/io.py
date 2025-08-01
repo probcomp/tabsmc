@@ -163,6 +163,10 @@ def encode_with_schema(df: pl.DataFrame, schema: dict):
     # Encode categorical variables
     for col in schema["types"]["categorical"]:
         if col in result_df.columns:
+            # Check if column is already integer encoded (skip if so)
+            if result_df[col].dtype in [pl.Int32, pl.Int64, pl.UInt32, pl.UInt64]:
+                continue
+                
             levels = schema["var_metadata"][col]["levels"]
             # Create mapping from level to index
             level_to_idx = {level: idx for idx, level in enumerate(levels)}
