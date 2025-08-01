@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 from functools import partial
 from tqdm import tqdm
+import jax.scipy as jsp
 
 # Define empty assignment constant - use a large but safe value
 EMPTY_ASSIGNMENT = 999999  # Large enough to be outside valid cluster range, small enough to avoid overflow
@@ -208,6 +209,140 @@ def masked_dirichlet_sample(key, α, mask):
 
 
 @jax.jit
+def compute_alpha_pi_posterior(pi_log, alpha_grid, prior_alpha=1.0):
+    """Compute log posterior for alpha_pi over a grid.
+    
+    Args:
+        pi_log: Log mixing weights (C,)
+        alpha_grid: Grid of alpha_pi values to evaluate (G,)
+        prior_alpha: Prior hyperparameter for alpha_pi (scalar)
+    
+    Returns:
+        Log posterior probabilities for each alpha value (G,)
+    """
+    C = pi_log.shape[0]
+    pi_probs = jnp.exp(pi_log)
+    
+    # Compute log likelihood for each alpha value
+    # p(π | α) = Dir(π; α, ..., α) = Γ(Cα) / Γ(α)^C * ∏ π_c^(α-1)
+    def log_likelihood_alpha(alpha):
+        log_gamma_C_alpha = jsp.special.gammaln(C * alpha)
+        log_gamma_alpha_C = C * jsp.special.gammaln(alpha)
+        log_prod_term = (alpha - 1.0) * jnp.sum(pi_log)
+        return log_gamma_C_alpha - log_gamma_alpha_C + log_prod_term
+    
+    log_likelihoods = jax.vmap(log_likelihood_alpha)(alpha_grid)
+    
+    # Add log prior: p(α) ∝ α^(prior_alpha-1)
+    log_priors = (prior_alpha - 1.0) * jnp.log(alpha_grid)
+    
+    # Compute log posterior (unnormalized)
+    log_posteriors = log_likelihoods + log_priors
+    
+    # Normalize using log-sum-exp
+    log_normalizer = jsp.special.logsumexp(log_posteriors)
+    log_posteriors_normalized = log_posteriors - log_normalizer
+    
+    return log_posteriors_normalized
+
+
+@jax.jit
+def compute_alpha_theta_posterior(theta_log, phi, alpha_grid, prior_alpha=1.0, mask=None):
+    """Compute log posterior for alpha_theta over a grid.
+    
+    Args:
+        theta_log: Log emission parameters (C, D, K)
+        phi: Sufficient statistics (C, D, K)
+        alpha_grid: Grid of alpha_theta values to evaluate (G,)
+        prior_alpha: Prior hyperparameter for alpha_theta (scalar)
+        mask: Optional boolean mask (D, K) for valid categories per feature
+    
+    Returns:
+        Log posterior probabilities for each alpha value (G,)
+    """
+    C, D, K = theta_log.shape
+    
+    def log_likelihood_alpha(alpha):
+        log_likelihood = 0.0
+        
+        # For each cluster and feature, compute Dir(θ_{c,d} | α, ..., α)
+        for c in range(C):
+            for d in range(D):
+                if mask is not None:
+                    # Get valid categories for this feature
+                    valid_mask = mask[d]
+                    n_valid = jnp.sum(valid_mask)
+                    
+                    # Only compute likelihood for valid categories
+                    log_gamma_K_alpha = jsp.special.gammaln(n_valid * alpha)
+                    log_gamma_alpha_K = n_valid * jsp.special.gammaln(alpha)
+                    
+                    # Sum over valid categories only
+                    valid_theta_log = jnp.where(valid_mask, theta_log[c, d], 0.0)
+                    log_prod_term = (alpha - 1.0) * jnp.sum(valid_theta_log)
+                else:
+                    # All K categories are valid
+                    log_gamma_K_alpha = jsp.special.gammaln(K * alpha)
+                    log_gamma_alpha_K = K * jsp.special.gammaln(alpha)
+                    log_prod_term = (alpha - 1.0) * jnp.sum(theta_log[c, d])
+                
+                log_likelihood += log_gamma_K_alpha - log_gamma_alpha_K + log_prod_term
+        
+        return log_likelihood
+    
+    log_likelihoods = jax.vmap(log_likelihood_alpha)(alpha_grid)
+    
+    # Add log prior: p(α) ∝ α^(prior_alpha-1)
+    log_priors = (prior_alpha - 1.0) * jnp.log(alpha_grid)
+    
+    # Compute log posterior (unnormalized)
+    log_posteriors = log_likelihoods + log_priors
+    
+    # Normalize using log-sum-exp
+    log_normalizer = jsp.special.logsumexp(log_posteriors)
+    log_posteriors_normalized = log_posteriors - log_normalizer
+    
+    return log_posteriors_normalized
+
+
+@jax.jit
+def sample_hyperparameters(key, pi_log, theta_log, phi, alpha_pi_grid, alpha_theta_grid, 
+                          prior_alpha_pi=1.0, prior_alpha_theta=1.0, mask=None):
+    """Sample new hyperparameters from their posterior distributions.
+    
+    Args:
+        key: PRNG key
+        pi_log: Log mixing weights (C,)
+        theta_log: Log emission parameters (C, D, K)
+        phi: Sufficient statistics (C, D, K)
+        alpha_pi_grid: Grid of alpha_pi values (G1,)
+        alpha_theta_grid: Grid of alpha_theta values (G2,)
+        prior_alpha_pi: Prior hyperparameter for alpha_pi (scalar)
+        prior_alpha_theta: Prior hyperparameter for alpha_theta (scalar)
+        mask: Optional boolean mask (D, K) for valid categories per feature
+    
+    Returns:
+        Tuple of (new_alpha_pi, new_alpha_theta)
+    """
+    key1, key2 = jax.random.split(key)
+    
+    # Compute posteriors
+    log_post_pi = compute_alpha_pi_posterior(pi_log, alpha_pi_grid, prior_alpha_pi)
+    log_post_theta = compute_alpha_theta_posterior(
+        theta_log, phi, alpha_theta_grid, prior_alpha_theta, mask
+    )
+    
+    # Sample from posteriors
+    idx_pi = jax.random.categorical(key1, log_post_pi)
+    idx_theta = jax.random.categorical(key2, log_post_theta)
+    
+    new_alpha_pi = alpha_pi_grid[idx_pi]
+    new_alpha_theta = alpha_theta_grid[idx_theta]
+    
+    return new_alpha_pi, new_alpha_theta
+
+
+@jax.jit
 def gibbs(key, X_B, I_B, A_indices, φ_old, π_old, θ_old, α_pi, α_theta, mask=None):
     """One step of Gibbs sampling for particle Gibbs.
 
@@ -383,6 +518,46 @@ def gibbs(key, X_B, I_B, A_indices, φ_old, π_old, θ_old, α_pi, α_theta, mas
     γ = π_p + θ_p + A_p + X_p
     
     return A_indices, φ, π, θ, γ, q, log_likelihoods
+
+
+@jax.jit
+def gibbs_with_hyperparameter_inference(key, X_B, I_B, A_indices, φ_old, π_old, θ_old, 
+                                       α_pi, α_theta, alpha_pi_grid, alpha_theta_grid,
+                                       prior_alpha_pi=1.0, prior_alpha_theta=1.0, mask=None):
+    """One step of Gibbs sampling with hyperparameter inference.
+
+    Args:
+        key: PRNG key
+        X_B: Minibatch data (B x D) with integer indices
+        I_B: Batch indices (B,)
+        A_indices: Current assignments as indices (N,)
+        φ_old: Current sufficient statistics (C x D x K)
+        π_old: Current mixing weights in log space (C,)
+        θ_old: Current emission parameters in log space (C x D x K)
+        α_pi: Current Dirichlet prior for mixing weights (scalar)
+        α_theta: Current Dirichlet prior for emission parameters (scalar)
+        alpha_pi_grid: Grid of alpha_pi values to consider (G1,)
+        alpha_theta_grid: Grid of alpha_theta values to consider (G2,)
+        prior_alpha_pi: Prior hyperparameter for alpha_pi (scalar)
+        prior_alpha_theta: Prior hyperparameter for alpha_theta (scalar)
+        mask: Optional boolean mask (D, K) for valid categories per feature
+
+    Returns:
+        Tuple of (A_indices, φ, π, θ, γ, q, log_likelihoods, new_α_pi, new_α_theta)
+    """
+    # First do the regular Gibbs step
+    key_gibbs, key_hyper = jax.random.split(key)
+    A_indices, φ, π, θ, γ, q, log_likelihoods = gibbs(
+        key_gibbs, X_B, I_B, A_indices, φ_old, π_old, θ_old, α_pi, α_theta, mask
+    )
+    
+    # Sample new hyperparameters from their posterior distributions
+    new_α_pi, new_α_theta = sample_hyperparameters(
+        key_hyper, π, θ, φ, alpha_pi_grid, alpha_theta_grid,
+        prior_alpha_pi, prior_alpha_theta, mask
+    )
+    
+    return A_indices, φ, π, θ, γ, q, log_likelihoods, new_α_pi, new_α_theta
 
 
 @jax.jit
@@ -697,3 +872,201 @@ def mcmc_minibatch(key, X, T, C, B, K, α_pi, α_theta, mask=None):
         )
     
     return A, φ, π, θ
+
+
+def smc_with_hyperparameter_inference(
+    key, X, T, P, C, B, K, α_pi_init, α_theta_init, 
+    alpha_pi_grid, alpha_theta_grid,
+    prior_alpha_pi=1.0, prior_alpha_theta=1.0,
+    rejuvenation=False, return_history=False, mask=None
+):
+    """Run SMC with hyperparameter inference on data.
+    
+    Args:
+        key: PRNG key
+        X: Full dataset (N x D) with integer indices
+        T: Number of iterations
+        P: Number of particles
+        C: Number of clusters
+        B: Batch size
+        K: Number of categories per feature (max across all features if mask provided)
+        α_pi_init: Initial Dirichlet prior for mixing weights (scalar)
+        α_theta_init: Initial Dirichlet prior for emission parameters (scalar)
+        alpha_pi_grid: Grid of alpha_pi values to consider (G1,)
+        alpha_theta_grid: Grid of alpha_theta values to consider (G2,)
+        prior_alpha_pi: Prior hyperparameter for alpha_pi (scalar)
+        prior_alpha_theta: Prior hyperparameter for alpha_theta (scalar)
+        rejuvenation: If True, perform rejuvenation step after each SMC step
+        return_history: If True, return history of particles and hyperparameters at each step
+        mask: Optional boolean mask (D, K) for valid categories per feature
+    
+    Returns:
+        If return_history is False:
+            Final particles, log weights, and hyperparameters
+        If return_history is True:
+            Final particles, log weights, hyperparameters, and history
+    """
+    N, D = X.shape
+    
+    # Ensure we have enough data for all batches
+    assert N >= B * T, f"Dataset too small: N={N} must be >= B*T={B*T}"
+    
+    # Initialize particles using init_empty
+    keys = jax.random.split(key, P + 1)
+    key = keys[0]
+    init_keys = keys[1:]
+    
+    # Vectorized initialization
+    init_particle = lambda k: init_empty(k, C, D, K, N, α_pi_init, α_theta_init, mask)
+    A, φ, π, θ = jax.vmap(init_particle)(init_keys)
+    
+    # Initialize weights and gammas
+    log_weights = jnp.zeros(P)
+    log_gammas = jnp.zeros(P)
+    
+    # Initialize hyperparameters for each particle
+    alpha_pi_particles = jnp.full(P, α_pi_init)
+    alpha_theta_particles = jnp.full(P, α_theta_init)
+    
+    # Initialize history if needed
+    if return_history:
+        # Pre-allocate arrays for history
+        history = {
+            'A': jnp.zeros((T, P, N), dtype=jnp.uint32),
+            'phi': jnp.zeros((T, P, C, D, K)),
+            'pi': jnp.zeros((T, P, C)),
+            'theta': jnp.zeros((T, P, C, D, K)),
+            'log_weights': jnp.zeros((T, P)),
+            'alpha_pi': jnp.zeros((T, P)),
+            'alpha_theta': jnp.zeros((T, P))
+        }
+    
+    for t in tqdm(range(T), desc="SMC with hyperparameter inference"):
+        # Deterministic batch indices (no wrap-around)
+        start_idx = t * B
+        end_idx = start_idx + B
+        I_B = jnp.arange(start_idx, end_idx)
+        X_B = X[I_B]
+        
+        # SMC step with hyperparameter inference
+        key, subkey = jax.random.split(key)
+        particles = (A, φ, π, θ)
+        particles, log_weights, log_gammas, alpha_pi_particles, alpha_theta_particles = smc_step_with_hyperparameter_inference(
+            subkey, particles, log_weights, log_gammas, X_B, I_B, 
+            alpha_pi_particles, alpha_theta_particles, alpha_pi_grid, alpha_theta_grid,
+            prior_alpha_pi, prior_alpha_theta, mask
+        )
+        A, φ, π, θ = particles
+        
+        # Store history if needed
+        if return_history:
+            history['A'] = history['A'].at[t].set(A)
+            history['phi'] = history['phi'].at[t].set(φ)
+            history['pi'] = history['pi'].at[t].set(π)
+            history['theta'] = history['theta'].at[t].set(θ)
+            history['log_weights'] = history['log_weights'].at[t].set(log_weights)
+            history['alpha_pi'] = history['alpha_pi'].at[t].set(alpha_pi_particles)
+            history['alpha_theta'] = history['alpha_theta'].at[t].set(alpha_theta_particles)
+    
+    # Return results
+    hyperparameters = {
+        'alpha_pi': alpha_pi_particles,
+        'alpha_theta': alpha_theta_particles
+    }
+    
+    if return_history:
+        return (A, φ, π, θ), log_weights, hyperparameters, history
+    else:
+        return (A, φ, π, θ), log_weights, hyperparameters
+
+
+@jax.jit
+def smc_step_with_hyperparameter_inference(key, particles, w, γ, X_B, I_B, 
+                                          alpha_pi_particles, alpha_theta_particles,
+                                          alpha_pi_grid, alpha_theta_grid,
+                                          prior_alpha_pi=1.0, prior_alpha_theta=1.0, 
+                                          mask=None):
+    """One step of SMC with hyperparameter inference.
+    
+    Args:
+        key: PRNG key
+        particles: Tuple of (A, φ, π, θ) arrays with leading particle dimension
+        w: Log weights for each particle (P,)
+        γ: Previous log target probabilities (P,)
+        X_B: New batch of data (B x D)
+        I_B: Batch indices (B,)
+        alpha_pi_particles: Current alpha_pi for each particle (P,)
+        alpha_theta_particles: Current alpha_theta for each particle (P,)
+        alpha_pi_grid: Grid of alpha_pi values to consider (G1,)
+        alpha_theta_grid: Grid of alpha_theta values to consider (G2,)
+        prior_alpha_pi: Prior hyperparameter for alpha_pi (scalar)
+        prior_alpha_theta: Prior hyperparameter for alpha_theta (scalar)
+        mask: Optional boolean mask (D, K) for valid categories per feature
+    
+    Returns:
+        Updated particles, log weights, log gammas, and hyperparameters
+    """
+    A, φ, π, θ = particles
+    P = w.shape[0]
+    
+    # Run Gibbs step with hyperparameter inference for each particle
+    keys = jax.random.split(key, P)
+    
+    def step_particle_with_hyperparams(p_key, p_A, p_φ, p_π, p_θ, p_α_pi, p_α_theta):
+        # Similar unassigning logic as in regular step_particle
+        C_local = p_π.shape[0]
+        B_local, D_local = X_B.shape
+        K_local = p_θ.shape[2]
+        A_B_old = p_A[I_B]
+        
+        assigned_mask = A_B_old != EMPTY_ASSIGNMENT
+        
+        # Compute and subtract old contributions (simplified for now)
+        φ_B_old = jnp.zeros((C_local, D_local, K_local))
+        φ_unassigned = p_φ - φ_B_old
+        
+        # Run Gibbs with hyperparameter inference
+        A_new, φ_new, π_new, θ_new, γ_new, q_new, log_liks, new_α_pi, new_α_theta = gibbs_with_hyperparameter_inference(
+            p_key, X_B, I_B, p_A, φ_unassigned, p_π, p_θ, 
+            p_α_pi, p_α_theta, alpha_pi_grid, alpha_theta_grid,
+            prior_alpha_pi, prior_alpha_theta, mask
+        )
+        
+        return A_new, φ_new, π_new, θ_new, γ_new, q_new, log_liks, new_α_pi, new_α_theta
+    
+    results = jax.vmap(step_particle_with_hyperparams)(
+        keys, A, φ, π, θ, alpha_pi_particles, alpha_theta_particles
+    )
+    A_new, φ_new, π_new, θ_new, γ_new, q_new, batch_log_liks, new_alpha_pi, new_alpha_theta = results
+    
+    # Compute importance weights
+    w_new = w + γ_new - γ - q_new
+    
+    # Resample if ESS is too low
+    ESS = jnp.exp(2 * jsp.special.logsumexp(w_new) - jsp.special.logsumexp(2 * w_new))
+    
+    def resample():
+        key_resample = jax.random.split(key, 1)[0]
+        indices = jax.random.categorical(key_resample, w_new - jnp.max(w_new), shape=(P,))
+        
+        A_resampled = A_new[indices]
+        φ_resampled = φ_new[indices] 
+        π_resampled = π_new[indices]
+        θ_resampled = θ_new[indices]
+        alpha_pi_resampled = new_alpha_pi[indices]
+        alpha_theta_resampled = new_alpha_theta[indices]
+        w_resampled = jnp.zeros(P)
+        γ_resampled = γ_new[indices]
+        
+        return (A_resampled, φ_resampled, π_resampled, θ_resampled), w_resampled, γ_resampled, alpha_pi_resampled, alpha_theta_resampled
+    
+    def no_resample():
+        return (A_new, φ_new, π_new, θ_new), w_new, γ_new, new_alpha_pi, new_alpha_theta
+    
+    particles_out, w_out, γ_out, alpha_pi_out, alpha_theta_out = jax.lax.cond(
+        ESS < P / 2,
+        lambda: resample(),
+        lambda: no_resample()
+    )
+    
+    return particles_out, w_out, γ_out, alpha_pi_out, alpha_theta_out
